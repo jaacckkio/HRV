@@ -1,4 +1,3 @@
-import 'dart:async';
 import 'dart:math' as math;
 import 'package:camera/camera.dart';
 import '../models/ppg_signal.dart';
@@ -18,19 +17,18 @@ class PPGService {
   final PPGConfig config;
 
   final SignalProcessor _processor;
-  final PeakDetector _peakDetector;
   final SignalQualityAssessor _qualityAssessor;
   final OutlierFilter _outlierFilter;
   final FrameRateDetector _frameRateDetector;
   final RRIntervalAnalyzer _rrAnalyzer;
-  final bool _isCustomPeakDetector;
 
   late RingBuffer<double> _rawBuffer;
   late RingBuffer<double> _filteredBuffer;
   late PeakDetector _adaptivePeakDetector;
   int _adaptiveMinDistance = 0;
-  double _adaptiveMinProminence = 0.0;
+  double _adaptiveMinProminence = 0.5;
   final Stopwatch _frameStopwatch = Stopwatch();
+  bool _buffersResized = false;
 
   PPGService({
     this.config = const PPGConfig(),
@@ -41,30 +39,21 @@ class PPGService {
     FrameRateDetector? frameRateDetector,
     RRIntervalAnalyzer? rrIntervalAnalyzer,
   })  : _processor = processor ?? const SignalProcessor(),
-        _peakDetector = peakDetector ?? const PeakDetector(),
         _qualityAssessor =
             qualityAssessor ?? SignalQualityAssessor.fromConfig(config),
         _outlierFilter = outlierFilter ?? OutlierFilter.fromConfig(config),
         _frameRateDetector = frameRateDetector ?? FrameRateDetector(),
         _rrAnalyzer =
-            rrIntervalAnalyzer ?? RRIntervalAnalyzer.fromConfig(config),
-        _isCustomPeakDetector = peakDetector != null {
+            rrIntervalAnalyzer ?? RRIntervalAnalyzer.fromConfig(config) {
     int capacity = (config.samplingRate * config.windowSizeSeconds).round();
     _rawBuffer = RingBuffer<double>(capacity);
     _filteredBuffer = RingBuffer<double>(capacity);
-    if (_isCustomPeakDetector) {
-      _adaptivePeakDetector = _peakDetector;
-      _adaptiveMinDistance = _peakDetector.minDistance;
-      _adaptiveMinProminence = _peakDetector.minProminence;
-    } else {
-      _adaptiveMinDistance =
-          _minDistanceFromFps(config.samplingRate.toDouble());
-      _adaptiveMinProminence = _peakDetector.minProminence;
-      _adaptivePeakDetector = PeakDetector(
-        minProminence: _adaptiveMinProminence,
-        minDistance: _adaptiveMinDistance,
-      );
-    }
+    _adaptiveMinDistance =
+        _minDistanceFromFps(config.samplingRate.toDouble());
+    _adaptivePeakDetector = PeakDetector(
+      minProminence: _adaptiveMinProminence,
+      minDistance: _adaptiveMinDistance,
+    );
   }
 
   void dispose() {
@@ -74,130 +63,112 @@ class PPGService {
     _frameStopwatch.stop();
   }
 
-  double get detectedFPS => _frameRateDetector.fps;
-  bool get isFPSStable => _frameRateDetector.isStable;
+  /// Process a single camera frame synchronously and return the current signal state.
+  PPGSignal processSingleFrame(CameraImage image) {
+    final now = DateTime.now();
 
-  Stream<PPGSignal> processImageStream(Stream<CameraImage> images) async* {
-    await for (final image in images) {
-      final now = DateTime.now();
+    // Record frame timing
+    _frameRateDetector.recordFrameMicros(_nowMicros());
+    final effectiveFPS = _effectiveFrameRate();
+    _resizeBuffersIfNeeded(effectiveFPS);
 
-      _frameRateDetector.recordFrameMicros(_nowMicros());
-      final effectiveFPS = _effectiveFrameRate();
-      _resizeBuffersIfNeeded(effectiveFPS);
+    // Extract intensity from frame
+    double intensity;
+    try {
+      intensity = _processor.extractRedChannel(image);
+    } catch (e) {
+      return PPGSignal(
+        rawIntensity: 0.0,
+        filteredIntensity: 0.0,
+        rrIntervals: [],
+        quality: SignalQuality.poor,
+        timestamp: now,
+        frameRate: _frameRateDetector.fps,
+        isFPSStable: _frameRateDetector.isStable,
+      );
+    }
 
-      double intensity;
-      try {
-        intensity = _processor.extractRedChannel(image);
-      } catch (e) {
-        continue;
-      }
+    _rawBuffer.add(intensity);
 
-      _rawBuffer.add(intensity);
+    // Need minimum samples before we can do anything useful
+    final minSamples = effectiveFPS.round();
+    if (!_rawBuffer.isFull && _rawBuffer.length < minSamples) {
+      return PPGSignal(
+        rawIntensity: intensity,
+        filteredIntensity: 0.0,
+        rrIntervals: [],
+        quality: SignalQuality.poor,
+        timestamp: now,
+        frameRate: _frameRateDetector.fps,
+        isFPSStable: _frameRateDetector.isStable,
+      );
+    }
 
-      final minSamplesForQuality = effectiveFPS.round();
-      if (!_rawBuffer.isFull && _rawBuffer.length < minSamplesForQuality) {
-        yield PPGSignal(
-          rawIntensity: intensity,
-          filteredIntensity: 0.0,
-          rrIntervals: [],
-          quality: SignalQuality.poor,
-          timestamp: now,
-          peakIndices: [],
-          snr: 0.0,
-          frameRate: _frameRateDetector.fps,
-          isFPSStable: _frameRateDetector.isStable,
-        );
-        continue;
-      }
+    final rawWindow = _rawBuffer.toList;
 
-      final rawWindow = _rawBuffer.toList;
+    // Assess quality
+    final quality =
+        _qualityAssessor.assessQualityWithDrift(rawWindow, effectiveFPS);
+    final driftRate =
+        _qualityAssessor.calculateDriftRate(rawWindow, effectiveFPS);
+    final snr = _qualityAssessor.calculateSNR(rawWindow);
 
-      final quality =
-          _qualityAssessor.assessQualityWithDrift(rawWindow, effectiveFPS);
-      final driftRate =
-          _qualityAssessor.calculateDriftRate(rawWindow, effectiveFPS);
+    // Apply bandpass filter
+    final filteredPoint =
+        _processor.simpleBandpassFilter(rawWindow, 5);
+    _filteredBuffer.add(filteredPoint);
 
-      if (quality == SignalQuality.poor) {
-        final filteredPoint =
-            _processor.simpleBandpassFilter(rawWindow, 5);
-        _filteredBuffer.add(filteredPoint);
-
-        yield PPGSignal(
-          rawIntensity: intensity,
-          filteredIntensity: filteredPoint,
-          rrIntervals: [],
-          quality: SignalQuality.poor,
-          timestamp: now,
-          peakIndices: [],
-          snr: _qualityAssessor.calculateSNR(rawWindow),
-          frameRate: _frameRateDetector.fps,
-          isFPSStable: _frameRateDetector.isStable,
-          driftRate: driftRate,
-        );
-        continue;
-      }
-
-      final filteredPoint =
-          _processor.simpleBandpassFilter(rawWindow, 5);
-      _filteredBuffer.add(filteredPoint);
-
-      if (!_frameRateDetector.isStable) {
-        final snr = _qualityAssessor.calculateSNR(rawWindow);
-        yield PPGSignal(
-          rawIntensity: intensity,
-          filteredIntensity: filteredPoint,
-          rrIntervals: [],
-          quality: quality,
-          timestamp: now,
-          peakIndices: const [],
-          snr: snr,
-          frameRate: _frameRateDetector.fps,
-          isFPSStable: false,
-          driftRate: driftRate,
-          sdrr: 0.0,
-          isSDRRAcceptable: false,
-          rejectionRatio: 0.0,
-          rejectedIntervalCount: 0,
-        );
-        continue;
-      }
-
-      final filteredWindow = _filteredBuffer.toList;
-      final dynamicProminence = _dynamicMinProminence(filteredWindow);
-      _updateAdaptivePeakDetector(effectiveFPS, dynamicProminence);
-      final peakIndices = _adaptivePeakDetector.findPeaks(filteredWindow);
-
-      List<double> rrIntervals = [];
-      FilterResult filterResult = const FilterResult(
-          intervals: [], totalInput: 0, rejectedCount: 0, rejectionRatio: 0.0);
-      RRAnalysisResult rrAnalysis = _rrAnalyzer.analyze(const <double>[]);
-      if (peakIndices.length >= 2) {
-        final rawRRs = _adaptivePeakDetector.peaksToRRIntervals(
-            peakIndices, effectiveFPS);
-        filterResult = _outlierFilter.filterOutliersWithStats(rawRRs);
-        rrIntervals = filterResult.intervals;
-        rrAnalysis = _rrAnalyzer.analyze(rrIntervals);
-      }
-
-      final snr = _qualityAssessor.calculateSNR(rawWindow);
-
-      yield PPGSignal(
+    // If quality is poor or FPS not stable, return early
+    if (quality == SignalQuality.poor || !_frameRateDetector.isStable) {
+      return PPGSignal(
         rawIntensity: intensity,
         filteredIntensity: filteredPoint,
-        rrIntervals: rrIntervals,
+        rrIntervals: [],
         quality: quality,
         timestamp: now,
-        peakIndices: peakIndices,
         snr: snr,
         frameRate: _frameRateDetector.fps,
         isFPSStable: _frameRateDetector.isStable,
         driftRate: driftRate,
-        sdrr: rrAnalysis.sdrr,
-        isSDRRAcceptable: rrAnalysis.isSDRRAcceptable,
-        rejectionRatio: filterResult.rejectionRatio,
-        rejectedIntervalCount: filterResult.rejectedCount,
       );
     }
+
+    // Detect peaks
+    final filteredWindow = _filteredBuffer.toList;
+    final dynamicProminence = _dynamicMinProminence(filteredWindow);
+    _updateAdaptivePeakDetector(effectiveFPS, dynamicProminence);
+    final peakIndices = _adaptivePeakDetector.findPeaks(filteredWindow);
+
+    // Extract and validate RR intervals
+    List<double> rrIntervals = [];
+    FilterResult filterResult = const FilterResult(
+        intervals: [], totalInput: 0, rejectedCount: 0, rejectionRatio: 0.0);
+    RRAnalysisResult rrAnalysis = _rrAnalyzer.analyze(const <double>[]);
+    
+    if (peakIndices.length >= 2) {
+      final rawRRs = _adaptivePeakDetector.peaksToRRIntervals(
+          peakIndices, effectiveFPS);
+      filterResult = _outlierFilter.filterOutliersWithStats(rawRRs);
+      rrIntervals = filterResult.intervals;
+      rrAnalysis = _rrAnalyzer.analyze(rrIntervals);
+    }
+
+    return PPGSignal(
+      rawIntensity: intensity,
+      filteredIntensity: filteredPoint,
+      rrIntervals: rrIntervals,
+      quality: quality,
+      timestamp: now,
+      peakIndices: peakIndices,
+      snr: snr,
+      frameRate: _frameRateDetector.fps,
+      isFPSStable: _frameRateDetector.isStable,
+      driftRate: driftRate,
+      sdrr: rrAnalysis.sdrr,
+      isSDRRAcceptable: rrAnalysis.isSDRRAcceptable,
+      rejectionRatio: filterResult.rejectionRatio,
+      rejectedIntervalCount: filterResult.rejectedCount,
+    );
   }
 
   double _effectiveFrameRate() {
@@ -208,10 +179,14 @@ class PPGService {
 
   void _resizeBuffersIfNeeded(double fps) {
     if (!_frameRateDetector.isStable) return;
+    if (_buffersResized) return;
 
     final desiredCapacity = (fps * config.windowSizeSeconds).round();
     if (desiredCapacity <= 0) return;
-    if (_rawBuffer.capacity == desiredCapacity) return;
+    if (_rawBuffer.capacity == desiredCapacity) {
+      _buffersResized = true;
+      return;
+    }
 
     final rawValues = _rawBuffer.toList;
     final filteredValues = _filteredBuffer.toList;
@@ -235,11 +210,11 @@ class PPGService {
 
     _rawBuffer = newRaw;
     _filteredBuffer = newFiltered;
+    _buffersResized = true;
   }
 
   void _updateAdaptivePeakDetector(double fps,
       [double? minProminenceOverride]) {
-    if (_isCustomPeakDetector) return;
     final minDistanceFrames = _minDistanceFromFps(fps);
     final minProminence = minProminenceOverride ?? _adaptiveMinProminence;
     final prominenceChanged =
@@ -269,7 +244,7 @@ class PPGService {
     if (signal.length < 10) {
       return _adaptiveMinProminence > 0.0
           ? _adaptiveMinProminence
-          : _peakDetector.minProminence;
+          : 0.5;
     }
     final start = signal.length > 60 ? signal.length - 60 : 0;
     final stdDev = _calculateStdDev(signal.sublist(start));

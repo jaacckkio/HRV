@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io' show Platform;
 import 'package:flutter/material.dart';
 import 'package:camera/camera.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
@@ -15,7 +16,7 @@ class MeasurementScreen extends StatefulWidget {
 
 class _MeasurementScreenState extends State<MeasurementScreen> {
   CameraController? _controller;
-  final _ppgService = PPGService();
+  PPGService? _ppgService;
 
   // State
   PPGSignal? _currentSignal;
@@ -30,14 +31,13 @@ class _MeasurementScreenState extends State<MeasurementScreen> {
   final List<double> _rawHistory = [];
   final List<double> _filteredHistory = [];
   final List<double> _rrHistory = [];
-  final List<double> _sessionRRIntervals = []; // All RR intervals for the session
+  final List<double> _sessionRRIntervals = [];
   List<int> _currentPeakIndices = [];
   static const int _historyLimit = 150;
   static const int _bpmWindowSize = 8;
 
-  PPGSignal? _pendingSignal;
-  StreamController<CameraImage>? _imageStreamController;
-  StreamSubscription<PPGSignal>? _ppgSubscription;
+  int _frameCount = 0;
+  String _debugInfo = '';
 
   @override
   void initState() {
@@ -56,14 +56,22 @@ class _MeasurementScreenState extends State<MeasurementScreen> {
         (c) => c.lensDirection == CameraLensDirection.back,
         orElse: () => cameras.first,
       );
+
+      // iOS works better with bgra8888, Android with yuv420
+      final imageFormat = Platform.isIOS
+          ? ImageFormatGroup.bgra8888
+          : ImageFormatGroup.yuv420;
+
       _controller = CameraController(
         camera,
         ResolutionPreset.low,
         enableAudio: false,
-        imageFormatGroup: ImageFormatGroup.yuv420,
+        imageFormatGroup: imageFormat,
       );
       await _controller!.initialize();
-      if (mounted) setState(() => _status = 'Ready. Tap START to measure.');
+      if (mounted) {
+        setState(() => _status = 'Ready. Tap START to measure.');
+      }
     } catch (e) {
       if (mounted) setState(() => _status = 'Camera error: $e');
     }
@@ -80,6 +88,10 @@ class _MeasurementScreenState extends State<MeasurementScreen> {
         _isTransitioning) return;
     _isTransitioning = true;
 
+    // Create fresh PPG service each session
+    _ppgService?.dispose();
+    _ppgService = PPGService();
+
     setState(() {
       _isScanning = true;
       _timeLeft = 60;
@@ -89,14 +101,13 @@ class _MeasurementScreenState extends State<MeasurementScreen> {
       _sessionRRIntervals.clear();
       _currentPeakIndices = [];
       _currentSignal = null;
-      _pendingSignal = null;
+      _frameCount = 0;
+      _debugInfo = '';
       _status = 'Starting...';
     });
 
-    // Keep screen on
     WakelockPlus.enable();
 
-    // Turn on flash
     try {
       await _controller!.setFlashMode(FlashMode.torch);
     } catch (e) {
@@ -111,19 +122,17 @@ class _MeasurementScreenState extends State<MeasurementScreen> {
       }
     });
 
-    // UI update throttle (10 Hz)
+    // UI update at 10 Hz
     _uiUpdateTimer = Timer.periodic(const Duration(milliseconds: 100), (_) {
-      if (mounted && _pendingSignal != null) _applyPendingSignal();
+      if (mounted && _isScanning) {
+        setState(() {});
+      }
     });
 
-    // Start camera stream
-    _imageStreamController = StreamController<CameraImage>();
+    // Start camera stream — process frames directly in callback
     try {
-      await _controller!.startImageStream((image) {
-        if (_imageStreamController != null &&
-            !_imageStreamController!.isClosed) {
-          _imageStreamController!.add(image);
-        }
+      await _controller!.startImageStream((CameraImage image) {
+        _processFrame(image);
       });
     } catch (e) {
       debugPrint('Image stream error: $e');
@@ -132,44 +141,43 @@ class _MeasurementScreenState extends State<MeasurementScreen> {
       return;
     }
 
-    // Process PPG
-    _ppgSubscription =
-        _ppgService.processImageStream(_imageStreamController!.stream).listen(
-      (signal) {
-        _pendingSignal = signal;
-
-        // Accumulate data
-        _rawHistory.add(signal.rawIntensity);
-        _filteredHistory.add(signal.filteredIntensity);
-        if (_rawHistory.length > _historyLimit) _rawHistory.removeAt(0);
-        if (_filteredHistory.length > _historyLimit) {
-          _filteredHistory.removeAt(0);
-        }
-        _currentPeakIndices = signal.peakIndices;
-
-        for (final rr in signal.rrIntervals) {
-          _rrHistory.add(rr);
-          _sessionRRIntervals.add(rr);
-          if (_rrHistory.length > 20) _rrHistory.removeAt(0);
-        }
-      },
-    );
-
     _isTransitioning = false;
   }
 
-  void _applyPendingSignal() {
-    if (_pendingSignal == null) return;
-    final signal = _pendingSignal!;
-    _pendingSignal = null;
-    setState(() {
+  void _processFrame(CameraImage image) {
+    if (!_isScanning || _ppgService == null) return;
+
+    _frameCount++;
+
+    try {
+      final signal = _ppgService!.processSingleFrame(image);
       _currentSignal = signal;
+
+      // Accumulate visualization data
+      _rawHistory.add(signal.rawIntensity);
+      _filteredHistory.add(signal.filteredIntensity);
+      if (_rawHistory.length > _historyLimit) _rawHistory.removeAt(0);
+      if (_filteredHistory.length > _historyLimit) _filteredHistory.removeAt(0);
+      _currentPeakIndices = signal.peakIndices;
+
+      for (final rr in signal.rrIntervals) {
+        _rrHistory.add(rr);
+        _sessionRRIntervals.add(rr);
+        if (_rrHistory.length > 20) _rrHistory.removeAt(0);
+      }
+
       _status = switch (signal.quality) {
         SignalQuality.good => 'Signal Good — Detecting heartbeats...',
         SignalQuality.fair => 'Signal Fair — Keep finger steady',
         SignalQuality.poor => 'Signal Poor — Cover camera + flash fully',
       };
-    });
+
+      _debugInfo = 'Frames: $_frameCount | '
+          'Raw: ${signal.rawIntensity.toStringAsFixed(1)} | '
+          'Format: ${image.format.group}';
+    } catch (e) {
+      _debugInfo = 'Error: $e';
+    }
   }
 
   Future<void> _stopProcessing() async {
@@ -178,12 +186,10 @@ class _MeasurementScreenState extends State<MeasurementScreen> {
 
     _timer?.cancel();
     _uiUpdateTimer?.cancel();
-    await _ppgSubscription?.cancel();
-    await _imageStreamController?.close();
     _timer = null;
     _uiUpdateTimer = null;
-    _ppgSubscription = null;
-    _imageStreamController = null;
+
+    _isScanning = false;
 
     if (_controller != null && _controller!.value.isInitialized) {
       try {
@@ -200,9 +206,8 @@ class _MeasurementScreenState extends State<MeasurementScreen> {
 
     if (mounted) {
       setState(() {
-        _isScanning = false;
         _status = _sessionRRIntervals.isEmpty
-            ? 'No heartbeats detected. Try again.'
+            ? 'No heartbeats detected. Tap START to retry.'
             : 'Done! Collected ${_sessionRRIntervals.length} RR intervals.';
       });
     }
@@ -211,8 +216,9 @@ class _MeasurementScreenState extends State<MeasurementScreen> {
 
   double _meanRecentRR() {
     if (_rrHistory.isEmpty) return 0.0;
-    final start =
-        _rrHistory.length > _bpmWindowSize ? _rrHistory.length - _bpmWindowSize : 0;
+    final start = _rrHistory.length > _bpmWindowSize
+        ? _rrHistory.length - _bpmWindowSize
+        : 0;
     double sum = 0.0;
     int count = 0;
     for (int i = start; i < _rrHistory.length; i++) {
@@ -235,10 +241,8 @@ class _MeasurementScreenState extends State<MeasurementScreen> {
   void dispose() {
     _timer?.cancel();
     _uiUpdateTimer?.cancel();
-    _ppgSubscription?.cancel();
-    _imageStreamController?.close();
     _controller?.dispose();
-    _ppgService.dispose();
+    _ppgService?.dispose();
     WakelockPlus.disable();
     super.dispose();
   }
@@ -330,6 +334,12 @@ class _MeasurementScreenState extends State<MeasurementScreen> {
                         style:
                             const TextStyle(fontSize: 11, color: Colors.grey),
                       ),
+                      if (_debugInfo.isNotEmpty)
+                        Text(
+                          _debugInfo,
+                          style: const TextStyle(
+                              fontSize: 9, color: Colors.white38),
+                        ),
                     ],
                   ),
                 ),
