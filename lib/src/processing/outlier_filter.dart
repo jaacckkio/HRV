@@ -18,8 +18,8 @@ class OutlierFilter {
 
   factory OutlierFilter.fromConfig(PPGConfig config) {
     return OutlierFilter(
-      minRRMs: config.minRRMs,
-      maxRRMs: config.maxRRMs,
+      minRRMs: 400.0,
+      maxRRMs: 1600.0,
       maxAdjacentChangeRatio: config.maxAdjacentRRChangeRatio,
     );
   }
@@ -47,7 +47,22 @@ class OutlierFilter {
       }
     }
 
-    // 2. Adjacent interval validation
+    // 2. Median-based pre-filter: reject intervals >30% from median
+    if (filtered.length >= 3) {
+      final sorted = List<double>.from(filtered)..sort();
+      final median = sorted[sorted.length ~/ 2];
+      final medianFiltered = <double>[];
+      for (final rr in filtered) {
+        if ((rr - median).abs() / median <= 0.30) {
+          medianFiltered.add(rr);
+        } else {
+          rejected++;
+        }
+      }
+      filtered = medianFiltered;
+    }
+
+    // 3. Adjacent interval validation
     if (filtered.length >= 2) {
       final adjacentFiltered = <double>[filtered[0]];
       for (int i = 1; i < filtered.length; i++) {
@@ -64,7 +79,7 @@ class OutlierFilter {
       filtered = adjacentFiltered;
     }
 
-    // 3. IQR filter
+    // 4. IQR filter
     if (filtered.length >= 4) {
       final beforeIQR = filtered.length;
       filtered = _applyIQRMethod(filtered);

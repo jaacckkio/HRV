@@ -30,6 +30,7 @@ class PPGService {
   final Stopwatch _frameStopwatch = Stopwatch();
   bool _buffersResized = false;
   int _lastReportedPeakCount = 0;
+  final List<double> _recentRRsForAdaptive = [];
 
   PPGService({
     this.config = const PPGConfig(),
@@ -63,6 +64,7 @@ class PPGService {
     _frameRateDetector.reset();
     _frameStopwatch.stop();
     _lastReportedPeakCount = 0;
+    _recentRRsForAdaptive.clear();
   }
 
   /// Reset all state for a new measurement session.
@@ -73,6 +75,7 @@ class PPGService {
     _frameStopwatch.stop();
     _buffersResized = false;
     _lastReportedPeakCount = 0;
+    _recentRRsForAdaptive.clear();
   }
 
   /// Process a single camera frame synchronously and return the current signal state.
@@ -149,7 +152,11 @@ class PPGService {
     final filteredWindow = _filteredBuffer.toList;
     final dynamicProminence = _dynamicMinProminence(filteredWindow);
     _updateAdaptivePeakDetector(effectiveFPS, dynamicProminence);
+    // Integer peaks for UI display (yellow dots on waveform)
     final peakIndices = _adaptivePeakDetector.findPeaks(filteredWindow);
+    // Interpolated peaks for accurate RR interval calculation
+    final interpolatedPeaks =
+        _adaptivePeakDetector.findPeaksInterpolated(filteredWindow);
 
     // Extract and validate RR intervals — only return NEW ones
     List<double> rrIntervals = [];
@@ -157,22 +164,27 @@ class PPGService {
         intervals: [], totalInput: 0, rejectedCount: 0, rejectionRatio: 0.0);
     RRAnalysisResult rrAnalysis = _rrAnalyzer.analyze(const <double>[]);
 
-    if (peakIndices.length >= 2) {
-      final rawRRs = _adaptivePeakDetector.peaksToRRIntervals(
-          peakIndices, effectiveFPS);
+    if (interpolatedPeaks.length >= 2) {
+      final rawRRs = _adaptivePeakDetector.peaksToRRIntervalsInterpolated(
+          interpolatedPeaks, effectiveFPS);
 
       // Only emit RR intervals corresponding to newly detected peaks.
       // If peaks fell off the window, adjust the count down without emitting.
-      if (peakIndices.length > _lastReportedPeakCount) {
-        final newIntervalCount = peakIndices.length - _lastReportedPeakCount;
+      if (interpolatedPeaks.length > _lastReportedPeakCount) {
+        final newIntervalCount =
+            interpolatedPeaks.length - _lastReportedPeakCount;
         final newRRs = rawRRs.length >= newIntervalCount
             ? rawRRs.sublist(rawRRs.length - newIntervalCount)
             : rawRRs;
         filterResult = _outlierFilter.filterOutliersWithStats(newRRs);
         rrIntervals = filterResult.intervals;
         rrAnalysis = _rrAnalyzer.analyze(rrIntervals);
+
+        // Collect valid RR intervals for adaptive min distance
+        _recentRRsForAdaptive.addAll(rrIntervals);
+        _updateAdaptiveMinDistance(effectiveFPS);
       }
-      _lastReportedPeakCount = peakIndices.length;
+      _lastReportedPeakCount = interpolatedPeaks.length;
     }
 
     return PPGSignal(
@@ -237,7 +249,10 @@ class PPGService {
 
   void _updateAdaptivePeakDetector(double fps,
       [double? minProminenceOverride]) {
-    final minDistanceFrames = _minDistanceFromFps(fps);
+    // Only use the default min distance if no adaptive distance has been set yet
+    final minDistanceFrames = _recentRRsForAdaptive.length >= 5
+        ? _adaptiveMinDistance
+        : _minDistanceFromFps(fps);
     final minProminence = minProminenceOverride ?? _adaptiveMinProminence;
     final prominenceChanged =
         (minProminence - _adaptiveMinProminence).abs() >= 0.05;
@@ -252,9 +267,33 @@ class PPGService {
   }
 
   int _minDistanceFromFps(double fps) {
-    int minDistanceFrames = (fps * (config.minRRMs / 1000.0)).round();
+    // Use 500ms default (120 BPM ceiling) instead of config.minRRMs (300ms)
+    // to reduce false peaks between real heartbeats
+    const defaultMinRRMs = 500.0;
+    int minDistanceFrames = (fps * (defaultMinRRMs / 1000.0)).round();
     if (minDistanceFrames < 1) minDistanceFrames = 1;
     return minDistanceFrames;
+  }
+
+  void _updateAdaptiveMinDistance(double fps) {
+    if (_recentRRsForAdaptive.length < 5) return;
+
+    // Compute median RR interval in ms
+    final sorted = List<double>.from(_recentRRsForAdaptive)..sort();
+    final medianRR = sorted[sorted.length ~/ 2];
+
+    // Set min distance to 70% of median RR in frames
+    final medianFrames = medianRR / 1000.0 * fps;
+    int adaptiveDistance = (medianFrames * 0.7).round();
+    if (adaptiveDistance < 1) adaptiveDistance = 1;
+
+    if (adaptiveDistance != _adaptiveMinDistance) {
+      _adaptivePeakDetector = PeakDetector(
+        minProminence: _adaptiveMinProminence,
+        minDistance: adaptiveDistance,
+      );
+      _adaptiveMinDistance = adaptiveDistance;
+    }
   }
 
   int _nowMicros() {

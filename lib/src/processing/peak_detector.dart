@@ -42,6 +42,32 @@ class PeakDetector {
     return peaks;
   }
 
+  /// Finds peaks with parabolic interpolation for sub-frame accuracy.
+  /// Returns fractional indices instead of integer indices.
+  List<double> findPeaksInterpolated(List<double> signal) {
+    final intPeaks = findPeaks(signal);
+    final interpolated = <double>[];
+
+    for (final i in intPeaks) {
+      if (i >= 1 && i < signal.length - 1) {
+        final alpha = signal[i - 1];
+        final beta = signal[i];
+        final gamma = signal[i + 1];
+        final denominator = alpha - 2 * beta + gamma;
+        if (denominator.abs() > 1e-10) {
+          final p = 0.5 * (alpha - gamma) / denominator;
+          interpolated.add(i + p);
+        } else {
+          interpolated.add(i.toDouble());
+        }
+      } else {
+        interpolated.add(i.toDouble());
+      }
+    }
+
+    return interpolated;
+  }
+
   /// Converts peak indices to RR intervals in milliseconds.
   List<double> peaksToRRIntervals(List<int> peakIndices, double frameRate) {
     if (peakIndices.length < 2) return [];
@@ -49,6 +75,21 @@ class PeakDetector {
     final rrIntervals = <double>[];
     for (int i = 1; i < peakIndices.length; i++) {
       final diffFrames = peakIndices[i] - peakIndices[i - 1];
+      final seconds = diffFrames / frameRate;
+      rrIntervals.add(seconds * 1000.0);
+    }
+    return rrIntervals;
+  }
+
+  /// Converts interpolated (fractional) peak indices to RR intervals in milliseconds.
+  List<double> peaksToRRIntervalsInterpolated(
+      List<double> interpolatedPeakIndices, double frameRate) {
+    if (interpolatedPeakIndices.length < 2) return [];
+
+    final rrIntervals = <double>[];
+    for (int i = 1; i < interpolatedPeakIndices.length; i++) {
+      final diffFrames =
+          interpolatedPeakIndices[i] - interpolatedPeakIndices[i - 1];
       final seconds = diffFrames / frameRate;
       rrIntervals.add(seconds * 1000.0);
     }
