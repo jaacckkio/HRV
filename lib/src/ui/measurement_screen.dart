@@ -4,8 +4,10 @@ import 'package:flutter/material.dart';
 import 'package:camera/camera.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 import '../processing/ppg_service.dart';
+import '../processing/hrv_calculator.dart';
 import '../models/ppg_signal.dart';
 import 'widgets/waveform_painter.dart';
+import 'results_screen.dart';
 
 class MeasurementScreen extends StatefulWidget {
   const MeasurementScreen({super.key});
@@ -35,9 +37,6 @@ class _MeasurementScreenState extends State<MeasurementScreen> {
   List<int> _currentPeakIndices = [];
   static const int _historyLimit = 150;
   static const int _bpmWindowSize = 8;
-
-  int _frameCount = 0;
-  String _debugInfo = '';
 
   @override
   void initState() {
@@ -101,8 +100,6 @@ class _MeasurementScreenState extends State<MeasurementScreen> {
       _sessionRRIntervals.clear();
       _currentPeakIndices = [];
       _currentSignal = null;
-      _frameCount = 0;
-      _debugInfo = '';
       _status = 'Starting...';
     });
 
@@ -147,8 +144,6 @@ class _MeasurementScreenState extends State<MeasurementScreen> {
   void _processFrame(CameraImage image) {
     if (!_isScanning || _ppgService == null) return;
 
-    _frameCount++;
-
     try {
       final signal = _ppgService!.processSingleFrame(image);
       _currentSignal = signal;
@@ -171,13 +166,7 @@ class _MeasurementScreenState extends State<MeasurementScreen> {
         SignalQuality.fair => 'Signal Fair — Keep finger steady',
         SignalQuality.poor => 'Signal Poor — Cover camera + flash fully',
       };
-
-      _debugInfo = 'Frames: $_frameCount | '
-          'Raw: ${signal.rawIntensity.toStringAsFixed(1)} | '
-          'Format: ${image.format.group}';
-    } catch (e) {
-      _debugInfo = 'Error: $e';
-    }
+    } catch (_) {}
   }
 
   Future<void> _stopProcessing() async {
@@ -204,11 +193,23 @@ class _MeasurementScreenState extends State<MeasurementScreen> {
 
     WakelockPlus.disable();
 
+    if (mounted && _sessionRRIntervals.isNotEmpty) {
+      final hrvResult = HrvCalculator.compute(_sessionRRIntervals);
+      Navigator.pushReplacement(
+        context,
+        MaterialPageRoute(
+          builder: (_) => ResultsScreen(
+            hrvResult: hrvResult,
+            rrIntervals: List<double>.from(_sessionRRIntervals),
+          ),
+        ),
+      );
+      return;
+    }
+
     if (mounted) {
       setState(() {
-        _status = _sessionRRIntervals.isEmpty
-            ? 'No heartbeats detected. Tap START to retry.'
-            : 'Done! Collected ${_sessionRRIntervals.length} RR intervals.';
+        _status = 'No heartbeats detected. Tap START to retry.';
       });
     }
     _isTransitioning = false;
@@ -334,12 +335,6 @@ class _MeasurementScreenState extends State<MeasurementScreen> {
                         style:
                             const TextStyle(fontSize: 11, color: Colors.grey),
                       ),
-                      if (_debugInfo.isNotEmpty)
-                        Text(
-                          _debugInfo,
-                          style: const TextStyle(
-                              fontSize: 9, color: Colors.white38),
-                        ),
                     ],
                   ),
                 ),
