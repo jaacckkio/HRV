@@ -29,6 +29,7 @@ class PPGService {
   double _adaptiveMinProminence = 0.5;
   final Stopwatch _frameStopwatch = Stopwatch();
   bool _buffersResized = false;
+  int _lastReportedPeakCount = 0;
 
   PPGService({
     this.config = const PPGConfig(),
@@ -61,6 +62,17 @@ class PPGService {
     _filteredBuffer.clear();
     _frameRateDetector.reset();
     _frameStopwatch.stop();
+    _lastReportedPeakCount = 0;
+  }
+
+  /// Reset all state for a new measurement session.
+  void reset() {
+    _rawBuffer.clear();
+    _filteredBuffer.clear();
+    _frameRateDetector.reset();
+    _frameStopwatch.stop();
+    _buffersResized = false;
+    _lastReportedPeakCount = 0;
   }
 
   /// Process a single camera frame synchronously and return the current signal state.
@@ -139,18 +151,28 @@ class PPGService {
     _updateAdaptivePeakDetector(effectiveFPS, dynamicProminence);
     final peakIndices = _adaptivePeakDetector.findPeaks(filteredWindow);
 
-    // Extract and validate RR intervals
+    // Extract and validate RR intervals — only return NEW ones
     List<double> rrIntervals = [];
     FilterResult filterResult = const FilterResult(
         intervals: [], totalInput: 0, rejectedCount: 0, rejectionRatio: 0.0);
     RRAnalysisResult rrAnalysis = _rrAnalyzer.analyze(const <double>[]);
-    
+
     if (peakIndices.length >= 2) {
       final rawRRs = _adaptivePeakDetector.peaksToRRIntervals(
           peakIndices, effectiveFPS);
-      filterResult = _outlierFilter.filterOutliersWithStats(rawRRs);
-      rrIntervals = filterResult.intervals;
-      rrAnalysis = _rrAnalyzer.analyze(rrIntervals);
+
+      // Only emit RR intervals corresponding to newly detected peaks.
+      // If peaks fell off the window, adjust the count down without emitting.
+      if (peakIndices.length > _lastReportedPeakCount) {
+        final newIntervalCount = peakIndices.length - _lastReportedPeakCount;
+        final newRRs = rawRRs.length >= newIntervalCount
+            ? rawRRs.sublist(rawRRs.length - newIntervalCount)
+            : rawRRs;
+        filterResult = _outlierFilter.filterOutliersWithStats(newRRs);
+        rrIntervals = filterResult.intervals;
+        rrAnalysis = _rrAnalyzer.analyze(rrIntervals);
+      }
+      _lastReportedPeakCount = peakIndices.length;
     }
 
     return PPGSignal(
