@@ -357,6 +357,7 @@ class _MeasurementScreenState extends State<MeasurementScreen> {
 
             // RR intervals
             _buildRRHistoryCard(),
+            const SizedBox(height: 100),
           ],
         ),
       ),
