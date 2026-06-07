@@ -10,6 +10,7 @@ import 'outlier_filter.dart';
 import 'frame_rate_detector.dart';
 import 'rr_interval_analyzer.dart';
 import 'ring_buffer.dart';
+import 'butterworth_filter.dart';
 
 /// Main service for processing camera images into PPG signals and RR intervals.
 /// Adapted from flutter_ppg (MIT License, shigindo.com)
@@ -31,6 +32,7 @@ class PPGService {
   bool _buffersResized = false;
   int _lastReportedPeakCount = 0;
   final List<double> _recentRRsForAdaptive = [];
+  ButterworthBandpassFilter? _butterworthFilter;
 
   PPGService({
     this.config = const PPGConfig(),
@@ -65,6 +67,8 @@ class PPGService {
     _frameStopwatch.stop();
     _lastReportedPeakCount = 0;
     _recentRRsForAdaptive.clear();
+    _butterworthFilter?.reset();
+    _butterworthFilter = null;
   }
 
   /// Reset all state for a new measurement session.
@@ -76,6 +80,8 @@ class PPGService {
     _buffersResized = false;
     _lastReportedPeakCount = 0;
     _recentRRsForAdaptive.clear();
+    _butterworthFilter?.reset();
+    _butterworthFilter = null;
   }
 
   /// Process a single camera frame synchronously and return the current signal state.
@@ -90,7 +96,7 @@ class PPGService {
     // Extract intensity from frame
     double intensity;
     try {
-      intensity = _processor.extractRedChannel(image);
+      intensity = _processor.extractChannel(image);
     } catch (e) {
       return PPGSignal(
         rawIntensity: 0.0,
@@ -128,9 +134,18 @@ class PPGService {
         _qualityAssessor.calculateDriftRate(rawWindow, effectiveFPS);
     final snr = _qualityAssessor.calculateSNR(rawWindow);
 
-    // Apply bandpass filter
-    final filteredPoint =
-        _processor.simpleBandpassFilter(rawWindow, 5);
+    // Apply Butterworth bandpass filter (initialise once FPS stabilises)
+    if (_butterworthFilter == null && _frameRateDetector.isStable) {
+      _butterworthFilter =
+          ButterworthBandpassFilter(sampleRate: _frameRateDetector.fps);
+    }
+
+    double filteredPoint;
+    if (_butterworthFilter != null) {
+      filteredPoint = _butterworthFilter!.process(intensity);
+    } else {
+      filteredPoint = 0.0;
+    }
     _filteredBuffer.add(filteredPoint);
 
     // If quality is poor or FPS not stable, return early

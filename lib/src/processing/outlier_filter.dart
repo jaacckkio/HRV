@@ -47,22 +47,7 @@ class OutlierFilter {
       }
     }
 
-    // 2. Median-based pre-filter: reject intervals >30% from median
-    if (filtered.length >= 3) {
-      final sorted = List<double>.from(filtered)..sort();
-      final median = sorted[sorted.length ~/ 2];
-      final medianFiltered = <double>[];
-      for (final rr in filtered) {
-        if ((rr - median).abs() / median <= 0.30) {
-          medianFiltered.add(rr);
-        } else {
-          rejected++;
-        }
-      }
-      filtered = medianFiltered;
-    }
-
-    // 3. Adjacent interval validation
+    // 2. Adjacent interval validation
     if (filtered.length >= 2) {
       final adjacentFiltered = <double>[filtered[0]];
       for (int i = 1; i < filtered.length; i++) {
@@ -79,7 +64,47 @@ class OutlierFilter {
       filtered = adjacentFiltered;
     }
 
-    // 4. IQR filter
+    // 3. Malik method — reject intervals deviating >20% from local average
+    if (filtered.length >= 3) {
+      final keep = List<bool>.filled(filtered.length, true);
+      for (int i = 0; i < filtered.length; i++) {
+        final start = i - 2 < 0 ? 0 : i - 2;
+        final end = i + 2 >= filtered.length ? filtered.length - 1 : i + 2;
+        double localSum = 0.0;
+        int localCount = 0;
+        for (int j = start; j <= end; j++) {
+          localSum += filtered[j];
+          localCount++;
+        }
+        final localMean = localSum / localCount;
+        if ((filtered[i] - localMean).abs() / localMean > 0.20) {
+          keep[i] = false;
+          rejected++;
+        }
+      }
+      final malikFiltered = <double>[];
+      for (int i = 0; i < filtered.length; i++) {
+        if (keep[i]) malikFiltered.add(filtered[i]);
+      }
+      filtered = malikFiltered;
+    }
+
+    // 4. Median-based filter: reject intervals >30% from median
+    if (filtered.length >= 3) {
+      final sorted = List<double>.from(filtered)..sort();
+      final median = sorted[sorted.length ~/ 2];
+      final medianFiltered = <double>[];
+      for (final rr in filtered) {
+        if ((rr - median).abs() / median <= 0.30) {
+          medianFiltered.add(rr);
+        } else {
+          rejected++;
+        }
+      }
+      filtered = medianFiltered;
+    }
+
+    // 5. IQR filter
     if (filtered.length >= 4) {
       final beforeIQR = filtered.length;
       filtered = _applyIQRMethod(filtered);

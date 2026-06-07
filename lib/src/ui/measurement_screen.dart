@@ -372,7 +372,7 @@ class _MeasurementScreenState extends State<MeasurementScreen> {
 
             // Waveforms
             _buildWaveformCard(
-                'Raw Signal (Red Channel)', _rawHistory, Colors.red.shade300, []),
+                'Raw Signal (Green Channel)', _rawHistory, Colors.red.shade300, []),
             const SizedBox(height: 10),
             _buildWaveformCard('Filtered Signal (Bandpass)', _filteredHistory,
                 Colors.greenAccent, _currentPeakIndices),
