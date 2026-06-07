@@ -111,6 +111,22 @@ class _MeasurementScreenState extends State<MeasurementScreen> {
       debugPrint('Flash error: $e');
     }
 
+    // Let auto-exposure adjust to finger + flash, then lock
+    if (mounted) setState(() => _status = 'Calibrating...');
+    await Future.delayed(const Duration(milliseconds: 1500));
+
+    try {
+      await _controller!.setExposureMode(ExposureMode.locked);
+    } catch (e) {
+      debugPrint('Exposure lock error: $e');
+    }
+
+    try {
+      await _controller!.setFocusMode(FocusMode.locked);
+    } catch (e) {
+      debugPrint('Focus lock error: $e');
+    }
+
     // Countdown timer
     _timer = Timer.periodic(const Duration(seconds: 1), (_) {
       if (mounted && _isScanning) {
@@ -188,6 +204,18 @@ class _MeasurementScreenState extends State<MeasurementScreen> {
         await _controller!.setFlashMode(FlashMode.off);
       } catch (e) {
         debugPrint('Stop camera error: $e');
+      }
+
+      try {
+        await _controller!.setExposureMode(ExposureMode.auto);
+      } catch (e) {
+        debugPrint('Exposure unlock error: $e');
+      }
+
+      try {
+        await _controller!.setFocusMode(FocusMode.auto);
+      } catch (e) {
+        debugPrint('Focus unlock error: $e');
       }
     }
 
