@@ -7,6 +7,7 @@ import '../processing/ppg_service.dart';
 import '../processing/hrv_calculator.dart';
 import '../models/ppg_signal.dart';
 import 'widgets/waveform_painter.dart';
+import 'widgets/finger_guide_animation.dart';
 import 'results_screen.dart';
 
 class MeasurementScreen extends StatefulWidget {
@@ -32,6 +33,7 @@ class _MeasurementScreenState extends State<MeasurementScreen> {
   DateTime? _fingerDetectedTime;
   bool _exposureLocked = false;
   DateTime? _measuringStartTime;
+  bool _showingHelp = false;
 
   // Data buffers for visualization
   final List<double> _rawHistory = [];
@@ -289,6 +291,14 @@ class _MeasurementScreenState extends State<MeasurementScreen> {
     _isTransitioning = false;
   }
 
+  void _showHelpOverlay() {
+    setState(() => _showingHelp = true);
+  }
+
+  void _hideHelpOverlay() {
+    setState(() => _showingHelp = false);
+  }
+
   double _meanRecentRR() {
     if (_rrHistory.isEmpty) return 0.0;
     final start = _rrHistory.length > _bpmWindowSize
@@ -339,96 +349,127 @@ class _MeasurementScreenState extends State<MeasurementScreen> {
         title: const Text('HRV Camera — Layer 1'),
         backgroundColor: const Color(0xFF02427A),
         foregroundColor: Colors.white,
-      ),
-      body: SingleChildScrollView(
-        padding: const EdgeInsets.all(12),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            // Top row: camera preview + stats
-            Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                _buildCameraPreview(),
-                const SizedBox(width: 16),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Row(
-                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                        children: [
-                          Text(
-                            '$hrDisplay BPM',
-                            style: TextStyle(
-                              fontSize: 32,
-                              fontWeight: FontWeight.bold,
-                              color: _qualityColor(),
-                            ),
-                          ),
-                          if (_isScanning)
-                            Container(
-                              padding: const EdgeInsets.symmetric(
-                                  horizontal: 10, vertical: 5),
-                              decoration: BoxDecoration(
-                                color: _timeLeft <= 10
-                                    ? Colors.red.withAlpha(40)
-                                    : Colors.white10,
-                                borderRadius: BorderRadius.circular(12),
-                              ),
-                              child: Text(
-                                '${_timeLeft}s',
-                                style: TextStyle(
-                                  fontSize: 18,
-                                  fontWeight: FontWeight.bold,
-                                  color: _timeLeft <= 10
-                                      ? Colors.redAccent
-                                      : Colors.white70,
-                                ),
-                              ),
-                            ),
-                        ],
-                      ),
-                      const SizedBox(height: 6),
-                      Text(
-                        _status,
-                        style: TextStyle(color: _qualityColor(), fontSize: 13),
-                      ),
-                      const SizedBox(height: 8),
-                      Text(
-                        'Quality: ${quality.name.toUpperCase()} | '
-                        'SNR: ${snr.toStringAsFixed(1)} dB',
-                        style:
-                            const TextStyle(fontSize: 11, color: Colors.grey),
-                      ),
-                      Text(
-                        'FPS: ${fps.toStringAsFixed(0)} '
-                        '${fpsStable ? "✓" : "⏳"} | '
-                        'Rej: ${(rejRatio * 100).toStringAsFixed(0)}% | '
-                        'RRs: ${_sessionRRIntervals.length}',
-                        style:
-                            const TextStyle(fontSize: 11, color: Colors.grey),
-                      ),
-                    ],
+        actions: [
+          Padding(
+            padding: const EdgeInsets.only(right: 8),
+            child: GestureDetector(
+              onTap: _showHelpOverlay,
+              child: Container(
+                width: 36,
+                height: 36,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: Colors.white.withOpacity(0.2),
+                ),
+                child: const Center(
+                  child: Text(
+                    '?',
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 18,
+                      fontWeight: FontWeight.bold,
+                    ),
                   ),
                 ),
+              ),
+            ),
+          ),
+        ],
+      ),
+      body: Stack(
+        children: [
+          SingleChildScrollView(
+            padding: const EdgeInsets.all(12),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                // Top row: camera preview + stats
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    _buildCameraPreview(),
+                    const SizedBox(width: 16),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Row(
+                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                            children: [
+                              Text(
+                                '$hrDisplay BPM',
+                                style: TextStyle(
+                                  fontSize: 32,
+                                  fontWeight: FontWeight.bold,
+                                  color: _qualityColor(),
+                                ),
+                              ),
+                              if (_isScanning)
+                                Container(
+                                  padding: const EdgeInsets.symmetric(
+                                      horizontal: 10, vertical: 5),
+                                  decoration: BoxDecoration(
+                                    color: _timeLeft <= 10
+                                        ? Colors.red.withAlpha(40)
+                                        : Colors.white10,
+                                    borderRadius: BorderRadius.circular(12),
+                                  ),
+                                  child: Text(
+                                    '${_timeLeft}s',
+                                    style: TextStyle(
+                                      fontSize: 18,
+                                      fontWeight: FontWeight.bold,
+                                      color: _timeLeft <= 10
+                                          ? Colors.redAccent
+                                          : Colors.white70,
+                                    ),
+                                  ),
+                                ),
+                            ],
+                          ),
+                          const SizedBox(height: 6),
+                          Text(
+                            _status,
+                            style: TextStyle(color: _qualityColor(), fontSize: 13),
+                          ),
+                          const SizedBox(height: 8),
+                          Text(
+                            'Quality: ${quality.name.toUpperCase()} | '
+                            'SNR: ${snr.toStringAsFixed(1)} dB',
+                            style:
+                                const TextStyle(fontSize: 11, color: Colors.grey),
+                          ),
+                          Text(
+                            'FPS: ${fps.toStringAsFixed(0)} '
+                            '${fpsStable ? "✓" : "⏳"} | '
+                            'Rej: ${(rejRatio * 100).toStringAsFixed(0)}% | '
+                            'RRs: ${_sessionRRIntervals.length}',
+                            style:
+                                const TextStyle(fontSize: 11, color: Colors.grey),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 16),
+
+                // Waveforms
+                _buildWaveformCard(
+                    'Raw Signal (Red Channel)', _rawHistory, Colors.red.shade300, []),
+                const SizedBox(height: 10),
+                _buildWaveformCard('Filtered Signal (Bandpass)', _filteredHistory,
+                    Colors.greenAccent, _currentPeakIndices),
+                const SizedBox(height: 10),
+
+                // RR intervals
+                _buildRRHistoryCard(),
+                const SizedBox(height: 100),
               ],
             ),
-            const SizedBox(height: 16),
-
-            // Waveforms
-            _buildWaveformCard(
-                'Raw Signal (Red Channel)', _rawHistory, Colors.red.shade300, []),
-            const SizedBox(height: 10),
-            _buildWaveformCard('Filtered Signal (Bandpass)', _filteredHistory,
-                Colors.greenAccent, _currentPeakIndices),
-            const SizedBox(height: 10),
-
-            // RR intervals
-            _buildRRHistoryCard(),
-            const SizedBox(height: 100),
-          ],
-        ),
+          ),
+          if (_showingHelp) _buildHelpOverlay(context),
+        ],
       ),
       floatingActionButton: FloatingActionButton.extended(
         onPressed: _isTransitioning ? null : _toggleScanning,
@@ -531,6 +572,137 @@ class _MeasurementScreenState extends State<MeasurementScreen> {
           ],
         ),
       ),
+    );
+  }
+
+  Widget _buildHelpOverlay(BuildContext context) {
+    final screenSize = MediaQuery.of(context).size;
+    return Positioned.fill(
+      child: GestureDetector(
+        onTap: _hideHelpOverlay,
+        child: Container(
+          color: Colors.black.withOpacity(0.5),
+          child: Center(
+            child: GestureDetector(
+              onTap: () {}, // Prevent tap-through to background
+              child: Container(
+                width: screenSize.width * 0.9,
+                constraints: BoxConstraints(
+                    maxHeight: screenSize.height * 0.75),
+                decoration: BoxDecoration(
+                  color: Colors.white,
+                  borderRadius: BorderRadius.circular(20),
+                  boxShadow: [
+                    BoxShadow(
+                      color: Colors.black.withOpacity(0.3),
+                      blurRadius: 20,
+                      offset: const Offset(0, 10),
+                    ),
+                  ],
+                ),
+                padding: const EdgeInsets.all(24),
+                child: SingleChildScrollView(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          const Text(
+                            'How to Measure',
+                            style: TextStyle(
+                              fontSize: 22,
+                              fontWeight: FontWeight.bold,
+                              color: Color(0xFF02427A),
+                            ),
+                          ),
+                          GestureDetector(
+                            onTap: _hideHelpOverlay,
+                            child: Container(
+                              width: 32,
+                              height: 32,
+                              decoration: BoxDecoration(
+                                shape: BoxShape.circle,
+                                color: Colors.grey.shade200,
+                              ),
+                              child: const Icon(Icons.close,
+                                  size: 18, color: Colors.grey),
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 20),
+                      const SizedBox(
+                        height: 250,
+                        child: FingerGuideAnimation(),
+                      ),
+                      const SizedBox(height: 20),
+                      const Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          _InstructionStep(
+                              number: '1',
+                              text: 'Place your phone on a flat surface'),
+                          SizedBox(height: 12),
+                          _InstructionStep(
+                              number: '2',
+                              text:
+                                  'Cover the rear camera AND flash with your fingertip'),
+                          SizedBox(height: 12),
+                          _InstructionStep(
+                              number: '3',
+                              text: "Press gently — don't push hard"),
+                          SizedBox(height: 12),
+                          _InstructionStep(
+                              number: '4',
+                              text:
+                                  'Stay completely still for 60 seconds'),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _InstructionStep extends StatelessWidget {
+  final String number;
+  final String text;
+  const _InstructionStep({required this.number, required this.text});
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Container(
+          width: 24,
+          height: 24,
+          decoration: const BoxDecoration(
+            shape: BoxShape.circle,
+            color: Color(0xFF06A3B7),
+          ),
+          child: Center(
+            child: Text(number,
+                style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 13,
+                    fontWeight: FontWeight.bold)),
+          ),
+        ),
+        const SizedBox(width: 12),
+        Expanded(
+          child: Text(text,
+              style: const TextStyle(
+                  fontSize: 15, color: Color(0xFF4B5563), height: 1.4)),
+        ),
+      ],
     );
   }
 }
