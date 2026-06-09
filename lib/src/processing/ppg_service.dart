@@ -100,14 +100,25 @@ class PPGService {
         timestamp: now,
         frameRate: _frameRateDetector.fps,
         isFPSStable: _frameRateDetector.isStable,
+        fingerDetected: false,
       );
     }
+
+    // Extract RGB channel means for colour-based finger detection
+    double meanR = 0, meanG = 0, meanB = 0;
+    try {
+      final rgb = _processor.extractRGBMeans(image);
+      meanR = rgb.meanR;
+      meanG = rgb.meanG;
+      meanB = rgb.meanB;
+    } catch (_) {}
 
     _rawBuffer.add(intensity);
 
     // Need minimum samples before we can do anything useful
     final minSamples = effectiveFPS.round();
     if (!_rawBuffer.isFull && _rawBuffer.length < minSamples) {
+      final fingerDetected = _qualityAssessor.isFingerPresentByColor(meanR, meanG, meanB);
       return PPGSignal(
         rawIntensity: intensity,
         filteredIntensity: 0.0,
@@ -116,14 +127,17 @@ class PPGService {
         timestamp: now,
         frameRate: _frameRateDetector.fps,
         isFPSStable: _frameRateDetector.isStable,
+        fingerDetected: fingerDetected,
       );
     }
 
     final rawWindow = _rawBuffer.toList;
 
-    // Assess quality
-    final quality =
-        _qualityAssessor.assessQualityWithDrift(rawWindow, effectiveFPS);
+    // Assess quality with colour-based finger detection
+    final qualityResult = _qualityAssessor.assessQualityWithColorDetection(
+        rawWindow, effectiveFPS, meanR, meanG, meanB);
+    final quality = qualityResult.quality;
+    final fingerDetected = qualityResult.fingerDetected;
     final driftRate =
         _qualityAssessor.calculateDriftRate(rawWindow, effectiveFPS);
     final snr = _qualityAssessor.calculateSNR(rawWindow);
@@ -145,6 +159,7 @@ class PPGService {
         frameRate: _frameRateDetector.fps,
         isFPSStable: _frameRateDetector.isStable,
         driftRate: driftRate,
+        fingerDetected: fingerDetected,
       );
     }
 
@@ -202,6 +217,7 @@ class PPGService {
       isSDRRAcceptable: rrAnalysis.isSDRRAcceptable,
       rejectionRatio: filterResult.rejectionRatio,
       rejectedIntervalCount: filterResult.rejectedCount,
+      fingerDetected: fingerDetected,
     );
   }
 

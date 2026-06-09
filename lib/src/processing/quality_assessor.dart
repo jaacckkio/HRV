@@ -108,6 +108,63 @@ class SignalQualityAssessor {
     return basicQuality;
   }
 
+  bool isFingerPresentByColor(double meanR, double meanG, double meanB) {
+    // When finger covers camera + flash:
+    // - Red channel is very high (light transmits through blood/tissue)
+    // - Green and blue are much lower (absorbed by hemoglobin)
+    // - R / (G + B) ratio is typically 1.5-4.0
+    // When pointing at objects:
+    // - All channels are more balanced
+    // - R / (G + B) is typically below 1.0
+
+    if (meanR < 150) return false;
+
+    final denominator = meanG + meanB;
+    if (denominator < 1.0) return true; // Extremely dark, assume finger
+
+    final fingerScore = meanR / denominator;
+    return fingerScore > 1.5;
+  }
+
+  ({SignalQuality quality, bool fingerDetected}) assessQualityWithColorDetection(
+      List<double> recentSignals, double frameRate,
+      double meanR, double meanG, double meanB) {
+    if (recentSignals.isEmpty) {
+      return (quality: SignalQuality.poor, fingerDetected: false);
+    }
+
+    final fingerDetected = isFingerPresentByColor(meanR, meanG, meanB);
+
+    if (!fingerDetected) {
+      return (quality: SignalQuality.poor, fingerDetected: false);
+    }
+
+    final minSamples = frameRate.round();
+    if (recentSignals.length < minSamples) {
+      return (quality: SignalQuality.fair, fingerDetected: true);
+    }
+
+    final snr = calculateSNR(recentSignals);
+
+    SignalQuality basicQuality;
+    if (snr > minGoodSNR) {
+      basicQuality = SignalQuality.good;
+    } else if (snr > minFairSNR) {
+      basicQuality = SignalQuality.fair;
+    } else {
+      return (quality: SignalQuality.poor, fingerDetected: true);
+    }
+
+    final driftRate = calculateDriftRate(recentSignals, frameRate).abs();
+    if (driftRate > maxDriftRate) {
+      basicQuality = basicQuality == SignalQuality.good
+          ? SignalQuality.fair
+          : SignalQuality.poor;
+    }
+
+    return (quality: basicQuality, fingerDetected: true);
+  }
+
   double _calculateVariance(List<double> data) {
     if (data.isEmpty) return 0.0;
     final mean = data.reduce((a, b) => a + b) / data.length;

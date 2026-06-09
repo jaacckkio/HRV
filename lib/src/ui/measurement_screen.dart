@@ -161,11 +161,15 @@ class _MeasurementScreenState extends State<MeasurementScreen> {
         if (_rrHistory.length > 20) _rrHistory.removeAt(0);
       }
 
-      _status = switch (signal.quality) {
-        SignalQuality.good => 'Signal Good — Detecting heartbeats...',
-        SignalQuality.fair => 'Signal Fair — Keep finger steady',
-        SignalQuality.poor => 'Signal Poor — Cover camera + flash fully',
-      };
+      if (!signal.fingerDetected) {
+        _status = 'No finger detected — place finger over camera and flash';
+      } else {
+        _status = switch (signal.quality) {
+          SignalQuality.good => 'Signal Good — Detecting heartbeats...',
+          SignalQuality.fair => 'Signal Fair — Keep finger steady',
+          SignalQuality.poor => 'Signal Poor — Keep finger steady',
+        };
+      }
     } catch (_) {}
   }
 

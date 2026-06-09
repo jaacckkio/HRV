@@ -18,6 +18,7 @@ class PPGSignal {
   final bool isSDRRAcceptable;
   final double rejectionRatio;
   final int rejectedIntervalCount;
+  final bool fingerDetected;
 
   PPGSignal({
     required this.rawIntensity,
@@ -34,5 +35,6 @@ class PPGSignal {
     this.isSDRRAcceptable = true,
     this.rejectionRatio = 0.0,
     this.rejectedIntervalCount = 0,
+    this.fingerDetected = false,
   });
 }
