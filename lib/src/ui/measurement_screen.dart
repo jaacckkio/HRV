@@ -197,6 +197,7 @@ class _MeasurementScreenState extends State<MeasurementScreen> {
         } catch (e) {
           debugPrint('Failed to lock focus: $e');
         }
+        _ppgService?.clearSignalBuffers();
         _status = 'Measuring...';
       }
 

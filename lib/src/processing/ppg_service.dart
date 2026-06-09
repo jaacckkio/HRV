@@ -81,6 +81,17 @@ class PPGService {
     _recentValidRRs.clear();
   }
 
+  /// Clear signal buffers and peak tracking state.
+  /// Call when starting a new measurement phase to discard stale data.
+  /// Preserves frame rate detection (which took time to stabilise).
+  void clearSignalBuffers() {
+    _rawBuffer.clear();
+    _filteredBuffer.clear();
+    _lastReportedPeakCount = 0;
+    _recentRRsForAdaptive.clear();
+    _recentValidRRs.clear();
+  }
+
   /// Process a single camera frame synchronously and return the current signal state.
   PPGSignal processSingleFrame(CameraImage image) {
     final now = DateTime.now();
@@ -170,11 +181,13 @@ class PPGService {
     final filteredWindow = _filteredBuffer.toList;
     final dynamicProminence = _dynamicMinProminence(filteredWindow);
     _updateAdaptivePeakDetector(effectiveFPS, dynamicProminence);
-    // Integer peaks for UI display (yellow dots on waveform)
-    final peakIndices = _adaptivePeakDetector.findPeaks(filteredWindow);
-    // Interpolated peaks for accurate RR interval calculation
-    final interpolatedPeaks =
-        _adaptivePeakDetector.findPeaksInterpolated(filteredWindow);
+    // Find integer peaks, merge dicrotic notches, then interpolate
+    final rawPeakIndices = _adaptivePeakDetector.findPeaks(filteredWindow);
+    final mergeDistanceFrames = (0.6 * effectiveFPS).round();
+    final peakIndices = PeakDetector.mergeDicroticNotches(
+        rawPeakIndices, filteredWindow, mergeDistanceFrames);
+    final interpolatedPeaks = PeakDetector.interpolateExistingPeaks(
+        peakIndices, filteredWindow);
 
     // Extract and validate RR intervals — only return NEW ones
     List<double> rrIntervals = [];

@@ -95,4 +95,59 @@ class PeakDetector {
     }
     return rrIntervals;
   }
+
+  /// Merge dicrotic notch peaks: when two peaks are closer than
+  /// [minDistanceFrames], keep the taller one and discard the shorter.
+  static List<int> mergeDicroticNotches(
+      List<int> peaks, List<double> signal, int minDistanceFrames) {
+    if (peaks.length < 2) return List<int>.from(peaks);
+
+    final merged = <int>[peaks[0]];
+
+    for (int i = 1; i < peaks.length; i++) {
+      final prev = merged.last;
+      final curr = peaks[i];
+
+      if (curr - prev < minDistanceFrames) {
+        // Two peaks too close together — one is a dicrotic notch.
+        // Keep whichever has the higher amplitude.
+        if (signal[curr] > signal[prev]) {
+          merged.removeLast();
+          merged.add(curr);
+        }
+        // else: prev is taller, keep it, discard curr
+      } else {
+        merged.add(curr);
+      }
+    }
+
+    return merged;
+  }
+
+  /// Parabolic interpolation on pre-determined integer peak indices.
+  static List<double> interpolateExistingPeaks(
+      List<int> peakIndices, List<double> signal) {
+    final interpolated = <double>[];
+
+    for (final i in peakIndices) {
+      if (i <= 0 || i >= signal.length - 1) {
+        interpolated.add(i.toDouble());
+        continue;
+      }
+
+      final alpha = signal[i - 1];
+      final beta = signal[i];
+      final gamma = signal[i + 1];
+
+      final denominator = alpha - 2 * beta + gamma;
+      if (denominator.abs() > 1e-10) {
+        final p = 0.5 * (alpha - gamma) / denominator;
+        interpolated.add(i + p);
+      } else {
+        interpolated.add(i.toDouble());
+      }
+    }
+
+    return interpolated;
+  }
 }
