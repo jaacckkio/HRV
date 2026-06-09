@@ -6,27 +6,32 @@ import 'package:camera/camera.dart';
 class SignalProcessor {
   const SignalProcessor();
 
-  /// Extracts the mean Green channel intensity from a CameraImage.
-  /// Green has the strongest PPG signal for fingertip contact with flash.
-  double extractChannel(CameraImage image) {
+  /// Extracts the mean Red channel intensity from a CameraImage.
+  double extractRedChannel(CameraImage image) {
     switch (image.format.group) {
       case ImageFormatGroup.yuv420:
-        return _extractLuminanceFromYUV420(image);
+        return _extractRedFromYUV420(image);
       case ImageFormatGroup.bgra8888:
-        return _extractGreenFromBGRA8888(image);
+        return _extractRedFromBGRA8888(image);
       default:
         throw UnsupportedError(
             'Unsupported image format: ${image.format.group}');
     }
   }
 
-  /// YUV420 has no direct green channel — use luminance (Y) as fallback.
-  double _extractLuminanceFromYUV420(CameraImage image) {
+  double _extractRedFromYUV420(CameraImage image) {
     final yPlane = image.planes[0];
-    return _calculateMean(yPlane.bytes);
+    final yBytes = yPlane.bytes;
+    final yMean = _calculateMean(yBytes);
+
+    final vPlane = image.planes[2];
+    final vBytes = vPlane.bytes;
+    final vMean = _calculateMean(vBytes);
+
+    return yMean + 1.402 * (vMean - 128);
   }
 
-  double _extractGreenFromBGRA8888(CameraImage image) {
+  double _extractRedFromBGRA8888(CameraImage image) {
     final plane = image.planes[0];
     final bytes = plane.bytes;
     final int length = bytes.length;
@@ -34,8 +39,7 @@ class SignalProcessor {
     int sum = 0;
     int count = 0;
 
-    // BGRA8888: B=0, G=1, R=2, A=3
-    for (int i = 1; i < length; i += 4) {
+    for (int i = 2; i < length; i += 4) {
       sum += bytes[i];
       count++;
     }
