@@ -31,6 +31,7 @@ class _MeasurementScreenState extends State<MeasurementScreen> {
   bool _fingerFirstDetected = false;
   DateTime? _fingerDetectedTime;
   bool _exposureLocked = false;
+  DateTime? _measuringStartTime;
 
   // Data buffers for visualization
   final List<double> _rawHistory = [];
@@ -107,6 +108,7 @@ class _MeasurementScreenState extends State<MeasurementScreen> {
       _fingerFirstDetected = false;
       _fingerDetectedTime = null;
       _exposureLocked = false;
+      _measuringStartTime = null;
     });
 
     WakelockPlus.enable();
@@ -199,7 +201,12 @@ class _MeasurementScreenState extends State<MeasurementScreen> {
       }
 
       // === Phase 3: Measuring (exposure locked, collecting data) ===
-      if (!signal.fingerDetected) {
+      _measuringStartTime ??= DateTime.now();
+
+      final measuringElapsed = DateTime.now().difference(_measuringStartTime!);
+      if (measuringElapsed.inMilliseconds <= 5000) {
+        _status = 'Stabilising signal...';
+      } else if (!signal.fingerDetected) {
         _status = 'No finger detected — place finger over camera and flash';
       } else {
         _status = switch (signal.quality) {
@@ -209,10 +216,12 @@ class _MeasurementScreenState extends State<MeasurementScreen> {
         };
       }
 
-      for (final rr in signal.rrIntervals) {
-        _rrHistory.add(rr);
-        _sessionRRIntervals.add(rr);
-        if (_rrHistory.length > 20) _rrHistory.removeAt(0);
+      if (measuringElapsed.inMilliseconds > 5000) {
+        for (final rr in signal.rrIntervals) {
+          _rrHistory.add(rr);
+          _sessionRRIntervals.add(rr);
+          if (_rrHistory.length > 20) _rrHistory.removeAt(0);
+        }
       }
     } catch (_) {}
   }

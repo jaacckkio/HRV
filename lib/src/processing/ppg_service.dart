@@ -31,6 +31,7 @@ class PPGService {
   bool _buffersResized = false;
   int _lastReportedPeakCount = 0;
   final List<double> _recentRRsForAdaptive = [];
+  final List<double> _recentValidRRs = [];
 
   PPGService({
     this.config = const PPGConfig(),
@@ -65,6 +66,7 @@ class PPGService {
     _frameStopwatch.stop();
     _lastReportedPeakCount = 0;
     _recentRRsForAdaptive.clear();
+    _recentValidRRs.clear();
   }
 
   /// Reset all state for a new measurement session.
@@ -76,6 +78,7 @@ class PPGService {
     _buffersResized = false;
     _lastReportedPeakCount = 0;
     _recentRRsForAdaptive.clear();
+    _recentValidRRs.clear();
   }
 
   /// Process a single camera frame synchronously and return the current signal state.
@@ -202,6 +205,26 @@ class PPGService {
       _lastReportedPeakCount = interpolatedPeaks.length;
     }
 
+    // Track recent valid RR intervals for adaptive min distance (ratchet-up only)
+    for (final rr in rrIntervals) {
+      _recentValidRRs.add(rr);
+      if (_recentValidRRs.length > 30) _recentValidRRs.removeAt(0);
+    }
+
+    if (_recentValidRRs.length >= 5) {
+      final sorted = List<double>.from(_recentValidRRs)..sort();
+      final medianRR = sorted[sorted.length ~/ 2];
+      final adaptiveMinDistanceMs = medianRR * 0.7;
+      final adaptiveMinDistanceFrames = (adaptiveMinDistanceMs / 1000.0 * effectiveFPS).round();
+      if (adaptiveMinDistanceFrames > _adaptiveMinDistance) {
+        _adaptiveMinDistance = adaptiveMinDistanceFrames;
+        _adaptivePeakDetector = PeakDetector(
+          minProminence: _adaptiveMinProminence,
+          minDistance: _adaptiveMinDistance,
+        );
+      }
+    }
+
     return PPGSignal(
       rawIntensity: intensity,
       filteredIntensity: filteredPoint,
@@ -325,8 +348,8 @@ class PPGService {
     }
     final start = signal.length > 60 ? signal.length - 60 : 0;
     final stdDev = _calculateStdDev(signal.sublist(start));
-    final computed = stdDev * 0.5;
-    return computed < 0.2 ? 0.2 : computed;
+    final computed = stdDev * 1.0;
+    return computed < 0.5 ? 0.5 : computed;
   }
 
   double _calculateStdDev(List<double> values) {
