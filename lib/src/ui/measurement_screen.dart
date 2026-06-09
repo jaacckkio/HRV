@@ -28,6 +28,9 @@ class _MeasurementScreenState extends State<MeasurementScreen> {
   int _timeLeft = 60;
   Timer? _timer;
   Timer? _uiUpdateTimer;
+  bool _fingerFirstDetected = false;
+  DateTime? _fingerDetectedTime;
+  bool _exposureLocked = false;
 
   // Data buffers for visualization
   final List<double> _rawHistory = [];
@@ -101,6 +104,9 @@ class _MeasurementScreenState extends State<MeasurementScreen> {
       _currentPeakIndices = [];
       _currentSignal = null;
       _status = 'Starting...';
+      _fingerFirstDetected = false;
+      _fingerDetectedTime = null;
+      _exposureLocked = false;
     });
 
     WakelockPlus.enable();
@@ -141,7 +147,7 @@ class _MeasurementScreenState extends State<MeasurementScreen> {
     _isTransitioning = false;
   }
 
-  void _processFrame(CameraImage image) {
+  Future<void> _processFrame(CameraImage image) async {
     if (!_isScanning || _ppgService == null) return;
 
     try {
@@ -155,12 +161,44 @@ class _MeasurementScreenState extends State<MeasurementScreen> {
       if (_filteredHistory.length > _historyLimit) _filteredHistory.removeAt(0);
       _currentPeakIndices = signal.peakIndices;
 
-      for (final rr in signal.rrIntervals) {
-        _rrHistory.add(rr);
-        _sessionRRIntervals.add(rr);
-        if (_rrHistory.length > 20) _rrHistory.removeAt(0);
+      // === Phase 1: Waiting for finger ===
+      if (!_fingerFirstDetected) {
+        if (signal.fingerDetected) {
+          _fingerFirstDetected = true;
+          _fingerDetectedTime = DateTime.now();
+          _status = 'Finger detected — calibrating...';
+        } else {
+          _status = 'Place finger over camera and flash';
+        }
+        return;
       }
 
+      // === Phase 2: Calibrating (2 seconds after finger first detected) ===
+      if (!_exposureLocked) {
+        final elapsed = DateTime.now().difference(_fingerDetectedTime!);
+        if (elapsed.inMilliseconds < 2000) {
+          _status = 'Calibrating...';
+          return;
+        }
+
+        // 2 seconds have passed — lock exposure now
+        _exposureLocked = true;
+        try {
+          await _controller!.setExposureMode(ExposureMode.locked);
+          debugPrint('Exposure locked successfully');
+        } catch (e) {
+          debugPrint('Failed to lock exposure: $e');
+        }
+        try {
+          await _controller!.setFocusMode(FocusMode.locked);
+          debugPrint('Focus locked successfully');
+        } catch (e) {
+          debugPrint('Failed to lock focus: $e');
+        }
+        _status = 'Measuring...';
+      }
+
+      // === Phase 3: Measuring (exposure locked, collecting data) ===
       if (!signal.fingerDetected) {
         _status = 'No finger detected — place finger over camera and flash';
       } else {
@@ -169,6 +207,12 @@ class _MeasurementScreenState extends State<MeasurementScreen> {
           SignalQuality.fair => 'Signal Fair — Keep finger steady',
           SignalQuality.poor => 'Signal Poor — Keep finger steady',
         };
+      }
+
+      for (final rr in signal.rrIntervals) {
+        _rrHistory.add(rr);
+        _sessionRRIntervals.add(rr);
+        if (_rrHistory.length > 20) _rrHistory.removeAt(0);
       }
     } catch (_) {}
   }
@@ -193,6 +237,22 @@ class _MeasurementScreenState extends State<MeasurementScreen> {
       } catch (e) {
         debugPrint('Stop camera error: $e');
       }
+    }
+
+    if (_exposureLocked) {
+      try {
+        await _controller!.setExposureMode(ExposureMode.auto);
+        debugPrint('Exposure unlocked');
+      } catch (e) {
+        debugPrint('Failed to unlock exposure: $e');
+      }
+      try {
+        await _controller!.setFocusMode(FocusMode.auto);
+        debugPrint('Focus unlocked');
+      } catch (e) {
+        debugPrint('Failed to unlock focus: $e');
+      }
+      _exposureLocked = false;
     }
 
     WakelockPlus.disable();
