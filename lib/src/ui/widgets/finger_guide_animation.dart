@@ -134,16 +134,16 @@ class _FingerGuidePainter extends CustomPainter {
         Offset(flashX, flashY), flashR, Paint()..color = _kFlashYellow);
 
     // --- Finger ---
-    // Finger geometry: elongated, angled ~35 degrees, tip up-left
+    // Finger geometry: horizontal, long axis pointing left-right, tip pointing left
     const fingerLen = 80.0;
     const fingerWid = 36.0;
-    const angle = -0.55; // ~31 degrees from vertical, tip toward top-left
+    const angle = -math.pi / 2; // horizontal: long axis left-right, tip left
 
     // Compute finger centre position based on phase
     final restX = targetX;
     final restY = targetY;
-    final offX = size.width + 40.0;
-    final offY = size.height + 40.0;
+    final offX = size.width + 60.0;
+    final offY = targetY; // approach horizontally, same Y
 
     double fingerX, fingerY, fingerOpacity = 1.0, fingerScale = 1.0;
     bool showGlow = false;
@@ -152,16 +152,16 @@ class _FingerGuidePainter extends CustomPainter {
     double heartScale = 1.0;
 
     if (t < _kPhase1End) {
-      // Phase 1: finger offscreen
+      // Phase 1: finger offscreen to the right
       fingerX = offX;
       fingerY = offY;
       fingerOpacity = 0.0;
     } else if (t < _kPhase2End) {
-      // Phase 2: approach
+      // Phase 2: approach horizontally from the right
       final p = Curves.easeOut
           .transform((t - _kPhase1End) / (_kPhase2End - _kPhase1End));
       fingerX = offX + (restX - offX) * p;
-      fingerY = offY + (restY - offY) * p;
+      fingerY = restY;
       fingerOpacity = p.clamp(0.0, 1.0);
     } else if (t < _kPhase3End) {
       // Phase 3: press / squish
@@ -196,11 +196,11 @@ class _FingerGuidePainter extends CustomPainter {
         heartScale = 0.85 + 0.3 * glowIntensity;
       }
     } else {
-      // Lift / fade out
+      // Lift / fade out — retreat horizontally to the right
       final p =
           Curves.easeIn.transform((t - _kPhase4End) / (1.0 - _kPhase4End));
       fingerX = restX + (offX - restX) * p;
-      fingerY = restY + (offY - restY) * p;
+      fingerY = restY;
       fingerOpacity = (1.0 - p).clamp(0.0, 1.0);
     }
 
@@ -260,10 +260,10 @@ class _FingerGuidePainter extends CustomPainter {
       Paint()..color = skinColor.withOpacity(fingerOpacity),
     );
 
-    // Subtle highlight along left edge
+    // Subtle highlight along top edge (appears as upper side when horizontal)
     final highlightRRect = RRect.fromRectAndRadius(
       Rect.fromCenter(
-          center: const Offset(-6, 0), width: 10, height: fingerLen * 0.55),
+          center: const Offset(-6, 0), width: 10, height: fingerLen * 0.5),
       const Radius.circular(5),
     );
     canvas.drawRRect(
@@ -271,26 +271,34 @@ class _FingerGuidePainter extends CustomPainter {
       Paint()..color = _kSkinLight.withOpacity(0.45 * fingerOpacity),
     );
 
-    // Nail near the tip (top of finger in local coords)
+    // Nail near the tip — visible rounded rectangle
     final nailRRect = RRect.fromRectAndRadius(
       Rect.fromCenter(
-        center: Offset(0, -fingerLen / 2 + 16),
-        width: fingerWid * 0.52,
-        height: 18,
+        center: Offset(0, -fingerLen / 2 + 14),
+        width: fingerWid * 0.48,
+        height: 16,
       ),
-      const Radius.circular(6),
+      const Radius.circular(5),
     );
     canvas.drawRRect(
       nailRRect,
-      Paint()..color = _kNailColor.withOpacity(0.7 * fingerOpacity),
+      Paint()..color = _kNailColor.withOpacity(0.75 * fingerOpacity),
+    );
+    // Nail border for definition
+    canvas.drawRRect(
+      nailRRect,
+      Paint()
+        ..color = const Color(0xFFD4B5A0).withOpacity(0.4 * fingerOpacity)
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 0.5,
     );
 
     canvas.restore();
 
-    // --- Heart icon beside finger during measuring ---
+    // --- Heart icon at bottom-centre of phone during measuring ---
     if (showHeart && fingerOpacity > 0.5) {
-      final heartX = fingerX + 28;
-      final heartY = fingerY - 18;
+      final heartX = cx;
+      final heartY = pt + ph - 25;
       _drawHeart(
         canvas,
         Offset(heartX, heartY),
