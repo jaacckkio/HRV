@@ -4,6 +4,7 @@ import '../models/ppg_signal.dart';
 import '../models/ppg_config.dart';
 import '../models/filter_result.dart';
 import 'signal_processor.dart';
+import 'butterworth_filter.dart';
 import 'peak_detector.dart';
 import 'quality_assessor.dart';
 import 'outlier_filter.dart';
@@ -32,6 +33,7 @@ class PPGService {
   int _lastReportedPeakCount = 0;
   final List<double> _recentRRsForAdaptive = [];
   final List<double> _recentValidRRs = [];
+  ButterworthBandpassFilter? _butterworthFilter;
 
   PPGService({
     this.config = const PPGConfig(),
@@ -67,6 +69,8 @@ class PPGService {
     _lastReportedPeakCount = 0;
     _recentRRsForAdaptive.clear();
     _recentValidRRs.clear();
+    _butterworthFilter?.reset();
+    _butterworthFilter = null;
   }
 
   /// Reset all state for a new measurement session.
@@ -79,6 +83,8 @@ class PPGService {
     _lastReportedPeakCount = 0;
     _recentRRsForAdaptive.clear();
     _recentValidRRs.clear();
+    _butterworthFilter?.reset();
+    _butterworthFilter = null;
   }
 
   /// Clear signal buffers and peak tracking state.
@@ -90,6 +96,7 @@ class PPGService {
     _lastReportedPeakCount = 0;
     _recentRRsForAdaptive.clear();
     _recentValidRRs.clear();
+    _butterworthFilter?.reset();
   }
 
   /// Process a single camera frame synchronously and return the current signal state.
@@ -101,10 +108,16 @@ class PPGService {
     final effectiveFPS = _effectiveFrameRate();
     _resizeBuffersIfNeeded(effectiveFPS);
 
-    // Extract intensity from frame
+    // Extract RGB means (single pixel iteration) and derive HSV Value as PPG signal
     double intensity;
+    double meanR = 0, meanG = 0, meanB = 0;
     try {
-      intensity = _processor.extractRedChannel(image);
+      final rgb = _processor.extractRGBMeans(image);
+      meanR = rgb.meanR;
+      meanG = rgb.meanG;
+      meanB = rgb.meanB;
+      // HSV Value (brightness) as PPG signal — validated by HRV4Training
+      intensity = SignalProcessor.rgbToHsvValue(meanR, meanG, meanB);
     } catch (e) {
       return PPGSignal(
         rawIntensity: 0.0,
@@ -117,15 +130,6 @@ class PPGService {
         fingerDetected: false,
       );
     }
-
-    // Extract RGB channel means for colour-based finger detection
-    double meanR = 0, meanG = 0, meanB = 0;
-    try {
-      final rgb = _processor.extractRGBMeans(image);
-      meanR = rgb.meanR;
-      meanG = rgb.meanG;
-      meanB = rgb.meanB;
-    } catch (_) {}
 
     _rawBuffer.add(intensity);
 
@@ -156,9 +160,23 @@ class PPGService {
         _qualityAssessor.calculateDriftRate(rawWindow, effectiveFPS);
     final snr = _qualityAssessor.calculateSNR(rawWindow);
 
-    // Apply bandpass filter
-    final filteredPoint =
-        _processor.simpleBandpassFilter(rawWindow, 5);
+    // Apply Butterworth bandpass filter (0.5–8 Hz)
+    if (_butterworthFilter == null && _frameRateDetector.isStable) {
+      _butterworthFilter = ButterworthBandpassFilter(sampleRate: _frameRateDetector.fps);
+    }
+
+    double filteredPoint;
+    if (_butterworthFilter != null) {
+      filteredPoint = _butterworthFilter!.process(intensity);
+    } else {
+      // Before FPS stabilises, use raw intensity minus running mean as crude filter
+      if (rawWindow.isNotEmpty) {
+        final mean = rawWindow.reduce((a, b) => a + b) / rawWindow.length;
+        filteredPoint = intensity - mean;
+      } else {
+        filteredPoint = 0.0;
+      }
+    }
     _filteredBuffer.add(filteredPoint);
 
     // If quality is poor or FPS not stable, return early

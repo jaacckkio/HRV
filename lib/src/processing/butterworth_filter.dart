@@ -15,9 +15,9 @@ class _BiquadState {
   }
 }
 
-/// Butterworth bandpass filter (0.75–3.5 Hz) implemented as two cascaded
+/// Butterworth bandpass filter (0.5–8 Hz) implemented as two cascaded
 /// biquad sections: a 2nd-order high-pass followed by a 2nd-order low-pass.
-/// Passes the cardiac frequency band (45–210 BPM).
+/// Wide passband removes DC drift and HF noise; peak detector isolates cardiac band.
 class ButterworthBandpassFilter {
   late final _BiquadCoeffs _hpCoeffs;
   late final _BiquadCoeffs _lpCoeffs;
@@ -25,8 +25,8 @@ class ButterworthBandpassFilter {
   final _BiquadState _lpState = _BiquadState();
 
   ButterworthBandpassFilter({required double sampleRate}) {
-    _hpCoeffs = _computeHighPass(sampleRate, 0.75);
-    _lpCoeffs = _computeLowPass(sampleRate, 3.5);
+    _hpCoeffs = _computeHighPass(sampleRate, 0.5);
+    _lpCoeffs = _computeLowPass(sampleRate, 8.0);
   }
 
   static _BiquadCoeffs _computeHighPass(double sampleRate, double cutoff) {

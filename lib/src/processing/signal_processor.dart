@@ -89,6 +89,16 @@ class SignalProcessor {
     }
   }
 
+  /// Compute HSV Value (brightness) from RGB channel means.
+  /// HSV Value = max(R, G, B). This is what HRV4Training uses
+  /// as the PPG signal input (Altini and Amft, 2016).
+  static double rgbToHsvValue(double meanR, double meanG, double meanB) {
+    double v = meanR;
+    if (meanG > v) v = meanG;
+    if (meanB > v) v = meanB;
+    return v;
+  }
+
   double applyMovingAverage(List<double> buffer) {
     if (buffer.isEmpty) return 0.0;
 

@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:io' show Platform;
+import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:camera/camera.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
@@ -34,6 +35,8 @@ class _MeasurementScreenState extends State<MeasurementScreen> {
   bool _exposureLocked = false;
   DateTime? _measuringStartTime;
   bool _showingHelp = false;
+  int _selectedDuration = 60; // seconds
+  bool _showDurationPicker = false;
 
   // Data buffers for visualization
   final List<double> _rawHistory = [];
@@ -69,7 +72,7 @@ class _MeasurementScreenState extends State<MeasurementScreen> {
 
       _controller = CameraController(
         camera,
-        ResolutionPreset.low,
+        ResolutionPreset.medium,
         enableAudio: false,
         imageFormatGroup: imageFormat,
       );
@@ -99,7 +102,8 @@ class _MeasurementScreenState extends State<MeasurementScreen> {
 
     setState(() {
       _isScanning = true;
-      _timeLeft = 60;
+      _timeLeft = _selectedDuration;
+      _showDurationPicker = false;
       _rawHistory.clear();
       _filteredHistory.clear();
       _rrHistory.clear();
@@ -405,26 +409,9 @@ class _MeasurementScreenState extends State<MeasurementScreen> {
                                 ),
                               ),
                               if (_isScanning)
-                                Container(
-                                  padding: const EdgeInsets.symmetric(
-                                      horizontal: 10, vertical: 5),
-                                  decoration: BoxDecoration(
-                                    color: _timeLeft <= 10
-                                        ? Colors.red.withAlpha(40)
-                                        : Colors.white10,
-                                    borderRadius: BorderRadius.circular(12),
-                                  ),
-                                  child: Text(
-                                    '${_timeLeft}s',
-                                    style: TextStyle(
-                                      fontSize: 18,
-                                      fontWeight: FontWeight.bold,
-                                      color: _timeLeft <= 10
-                                          ? Colors.redAccent
-                                          : Colors.white70,
-                                    ),
-                                  ),
-                                ),
+                                _buildCountdownRing()
+                              else
+                                _buildDurationButton(),
                             ],
                           ),
                           const SizedBox(height: 6),
@@ -468,6 +455,7 @@ class _MeasurementScreenState extends State<MeasurementScreen> {
               ],
             ),
           ),
+          if (_showDurationPicker && !_isScanning) _buildDurationPicker(),
           if (_showingHelp) _buildHelpOverlay(context),
         ],
       ),
@@ -483,6 +471,144 @@ class _MeasurementScreenState extends State<MeasurementScreen> {
         ),
       ),
       floatingActionButtonLocation: FloatingActionButtonLocation.centerFloat,
+    );
+  }
+
+  String _formatTimeLeft() {
+    if (_timeLeft >= 60) {
+      final mins = _timeLeft ~/ 60;
+      final secs = _timeLeft % 60;
+      return '$mins:${secs.toString().padLeft(2, '0')}';
+    }
+    return '${_timeLeft}s';
+  }
+
+  Widget _buildCountdownRing() {
+    return SizedBox(
+      width: 48,
+      height: 48,
+      child: CustomPaint(
+        painter: _CountdownPainter(
+          progress: _timeLeft / _selectedDuration,
+          timeText: _formatTimeLeft(),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildDurationButton() {
+    return GestureDetector(
+      onTap: () {
+        setState(() {
+          _showDurationPicker = !_showDurationPicker;
+        });
+      },
+      child: Container(
+        width: 44,
+        height: 44,
+        decoration: BoxDecoration(
+          shape: BoxShape.circle,
+          color: Colors.white.withOpacity(0.1),
+          border: Border.all(color: const Color(0xFF06A3B7), width: 1.5),
+        ),
+        child: Center(
+          child: Text(
+            _selectedDuration >= 60
+                ? '${_selectedDuration ~/ 60}m'
+                : '${_selectedDuration}s',
+            style: const TextStyle(
+              color: Color(0xFF06A3B7),
+              fontSize: 14,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildDurationPicker() {
+    const options = [
+      (duration: 60, label: '60 seconds'),
+      (duration: 120, label: '2 minutes'),
+      (duration: 180, label: '3 minutes'),
+    ];
+
+    return Positioned(
+      top: 140,
+      right: 12,
+      child: Container(
+        constraints: const BoxConstraints(minWidth: 140),
+        decoration: BoxDecoration(
+          color: const Color(0xFF1C1F2A),
+          border: Border.all(color: const Color(0xFF2A2E3A)),
+          borderRadius: BorderRadius.circular(12),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withOpacity(0.4),
+              blurRadius: 12,
+              offset: const Offset(0, 4),
+            ),
+          ],
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            for (int i = 0; i < options.length; i++)
+              GestureDetector(
+                onTap: () {
+                  setState(() {
+                    _selectedDuration = options[i].duration;
+                    _showDurationPicker = false;
+                  });
+                },
+                child: Container(
+                  padding: const EdgeInsets.symmetric(
+                      horizontal: 16, vertical: 12),
+                  decoration: BoxDecoration(
+                    color: _selectedDuration == options[i].duration
+                        ? const Color(0xFF06A3B7).withOpacity(0.15)
+                        : Colors.transparent,
+                    border: i < options.length - 1
+                        ? const Border(
+                            bottom: BorderSide(color: Color(0xFF2A2E3A)))
+                        : null,
+                    borderRadius: i == 0
+                        ? const BorderRadius.vertical(
+                            top: Radius.circular(12))
+                        : i == options.length - 1
+                            ? const BorderRadius.vertical(
+                                bottom: Radius.circular(12))
+                            : null,
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(
+                        options[i].label,
+                        style: TextStyle(
+                          color: _selectedDuration == options[i].duration
+                              ? const Color(0xFF06A3B7)
+                              : Colors.white70,
+                          fontSize: 14,
+                          fontWeight:
+                              _selectedDuration == options[i].duration
+                                  ? FontWeight.bold
+                                  : FontWeight.normal,
+                        ),
+                      ),
+                      if (_selectedDuration == options[i].duration) ...[
+                        const SizedBox(width: 8),
+                        const Icon(Icons.check,
+                            size: 16, color: Color(0xFF06A3B7)),
+                      ],
+                    ],
+                  ),
+                ),
+              ),
+          ],
+        ),
+      ),
     );
   }
 
@@ -704,5 +830,67 @@ class _InstructionStep extends StatelessWidget {
         ),
       ],
     );
+  }
+}
+
+class _CountdownPainter extends CustomPainter {
+  final double progress; // 1.0 = full, 0.0 = empty
+  final String timeText;
+
+  _CountdownPainter({required this.progress, required this.timeText});
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final center = Offset(size.width / 2, size.height / 2);
+    final radius = size.width / 2 - 2;
+
+    // Background circle
+    final bgPaint = Paint()
+      ..color = Colors.white.withOpacity(0.1)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 3;
+    canvas.drawCircle(center, radius, bgPaint);
+
+    // Progress arc
+    final arcPaint = Paint()
+      ..color = const Color(0xFF06A3B7)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 3
+      ..strokeCap = StrokeCap.round;
+
+    final sweepAngle = 2 * pi * progress;
+    canvas.drawArc(
+      Rect.fromCircle(center: center, radius: radius),
+      -pi / 2, // start at top
+      sweepAngle, // sweep clockwise
+      false,
+      arcPaint,
+    );
+
+    // Time text
+    final textPainter = TextPainter(
+      text: TextSpan(
+        text: timeText,
+        style: const TextStyle(
+          color: Colors.white,
+          fontSize: 11,
+          fontWeight: FontWeight.bold,
+        ),
+      ),
+      textDirection: TextDirection.ltr,
+    );
+    textPainter.layout();
+    textPainter.paint(
+      canvas,
+      Offset(
+        center.dx - textPainter.width / 2,
+        center.dy - textPainter.height / 2,
+      ),
+    );
+  }
+
+  @override
+  bool shouldRepaint(covariant _CountdownPainter old) {
+    return old.progress != progress || old.timeText != timeText;
   }
 }

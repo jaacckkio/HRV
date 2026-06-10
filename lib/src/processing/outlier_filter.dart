@@ -79,7 +79,39 @@ class OutlierFilter {
       filtered = adjacentFiltered;
     }
 
-    // 4. IQR filter
+    // 4. Malik method — local average comparison (20% threshold)
+    // Compare each interval to the mean of up to 5 neighbours (2 before, itself, 2 after).
+    // Compute all local means FIRST, then reject — don't modify the list while iterating.
+    if (filtered.length >= 3) {
+      final keep = List<bool>.filled(filtered.length, true);
+      for (int i = 0; i < filtered.length; i++) {
+        int start = i - 2;
+        if (start < 0) start = 0;
+        int end = i + 2;
+        if (end >= filtered.length) end = filtered.length - 1;
+
+        double localSum = 0.0;
+        int localCount = 0;
+        for (int j = start; j <= end; j++) {
+          localSum += filtered[j];
+          localCount++;
+        }
+        final localMean = localSum / localCount;
+
+        if ((filtered[i] - localMean).abs() / localMean > 0.20) {
+          keep[i] = false;
+          rejected++;
+        }
+      }
+
+      final malikFiltered = <double>[];
+      for (int i = 0; i < filtered.length; i++) {
+        if (keep[i]) malikFiltered.add(filtered[i]);
+      }
+      filtered = malikFiltered;
+    }
+
+    // 5. IQR filter
     if (filtered.length >= 4) {
       final beforeIQR = filtered.length;
       filtered = _applyIQRMethod(filtered);
