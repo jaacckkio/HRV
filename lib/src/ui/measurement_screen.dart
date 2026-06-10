@@ -18,7 +18,8 @@ class MeasurementScreen extends StatefulWidget {
   State<MeasurementScreen> createState() => _MeasurementScreenState();
 }
 
-class _MeasurementScreenState extends State<MeasurementScreen> {
+class _MeasurementScreenState extends State<MeasurementScreen>
+    with TickerProviderStateMixin {
   CameraController? _controller;
   PPGService? _ppgService;
 
@@ -37,6 +38,7 @@ class _MeasurementScreenState extends State<MeasurementScreen> {
   bool _showingHelp = false;
   int _selectedDuration = 60; // seconds
   bool _showDurationPicker = false;
+  AnimationController? _countdownController;
 
   // Data buffers for visualization
   final List<double> _rawHistory = [];
@@ -72,7 +74,7 @@ class _MeasurementScreenState extends State<MeasurementScreen> {
 
       _controller = CameraController(
         camera,
-        ResolutionPreset.medium,
+        ResolutionPreset.low,
         enableAudio: false,
         imageFormatGroup: imageFormat,
       );
@@ -116,6 +118,13 @@ class _MeasurementScreenState extends State<MeasurementScreen> {
       _exposureLocked = false;
       _measuringStartTime = null;
     });
+
+    _countdownController?.dispose();
+    _countdownController = AnimationController(
+      vsync: this,
+      duration: Duration(seconds: _selectedDuration),
+    );
+    _countdownController!.forward();
 
     WakelockPlus.enable();
 
@@ -241,6 +250,7 @@ class _MeasurementScreenState extends State<MeasurementScreen> {
     _uiUpdateTimer?.cancel();
     _timer = null;
     _uiUpdateTimer = null;
+    _countdownController?.stop();
 
     _isScanning = false;
 
@@ -330,6 +340,7 @@ class _MeasurementScreenState extends State<MeasurementScreen> {
   void dispose() {
     _timer?.cancel();
     _uiUpdateTimer?.cancel();
+    _countdownController?.dispose();
     _controller?.dispose();
     _ppgService?.dispose();
     WakelockPlus.disable();
@@ -484,15 +495,33 @@ class _MeasurementScreenState extends State<MeasurementScreen> {
   }
 
   Widget _buildCountdownRing() {
-    return SizedBox(
-      width: 48,
-      height: 48,
-      child: CustomPaint(
-        painter: _CountdownPainter(
-          progress: _timeLeft / _selectedDuration,
-          timeText: _formatTimeLeft(),
+    if (_countdownController == null || !_countdownController!.isAnimating) {
+      return SizedBox(
+        width: 48,
+        height: 48,
+        child: CustomPaint(
+          painter: _CountdownPainter(
+            progress: _selectedDuration > 0 ? _timeLeft / _selectedDuration : 0,
+            timeText: _formatTimeLeft(),
+          ),
         ),
-      ),
+      );
+    }
+
+    return AnimatedBuilder(
+      animation: _countdownController!,
+      builder: (context, child) {
+        return SizedBox(
+          width: 48,
+          height: 48,
+          child: CustomPaint(
+            painter: _CountdownPainter(
+              progress: 1.0 - _countdownController!.value,
+              timeText: _formatTimeLeft(),
+            ),
+          ),
+        );
+      },
     );
   }
 

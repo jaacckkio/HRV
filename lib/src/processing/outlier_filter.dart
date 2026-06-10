@@ -79,11 +79,12 @@ class OutlierFilter {
       filtered = adjacentFiltered;
     }
 
-    // 4. Malik method — local average comparison (20% threshold)
-    // Compare each interval to the mean of up to 5 neighbours (2 before, itself, 2 after).
-    // Compute all local means FIRST, then reject — don't modify the list while iterating.
+    // 4. Malik method — local average comparison (15% threshold)
+    // REPLACE outlier intervals with interpolated values instead of deleting.
+    // This maintains time continuity which is critical for RMSSD accuracy.
     if (filtered.length >= 3) {
-      final keep = List<bool>.filled(filtered.length, true);
+      // First pass: identify which intervals are outliers
+      final isOutlier = List<bool>.filled(filtered.length, false);
       for (int i = 0; i < filtered.length; i++) {
         int start = i - 2;
         if (start < 0) start = 0;
@@ -98,17 +99,45 @@ class OutlierFilter {
         }
         final localMean = localSum / localCount;
 
-        if ((filtered[i] - localMean).abs() / localMean > 0.20) {
-          keep[i] = false;
+        if ((filtered[i] - localMean).abs() / localMean > 0.15) {
+          isOutlier[i] = true;
           rejected++;
         }
       }
 
-      final malikFiltered = <double>[];
+      // Second pass: replace outliers with interpolated values
+      // Use the mean of the nearest non-outlier neighbours on each side
       for (int i = 0; i < filtered.length; i++) {
-        if (keep[i]) malikFiltered.add(filtered[i]);
+        if (!isOutlier[i]) continue;
+
+        // Find nearest valid neighbour to the left
+        double? left;
+        for (int j = i - 1; j >= 0; j--) {
+          if (!isOutlier[j]) {
+            left = filtered[j];
+            break;
+          }
+        }
+
+        // Find nearest valid neighbour to the right
+        double? right;
+        for (int j = i + 1; j < filtered.length; j++) {
+          if (!isOutlier[j]) {
+            right = filtered[j];
+            break;
+          }
+        }
+
+        // Replace with interpolated value
+        if (left != null && right != null) {
+          filtered[i] = (left + right) / 2;
+        } else if (left != null) {
+          filtered[i] = left;
+        } else if (right != null) {
+          filtered[i] = right;
+        }
+        // If no valid neighbours at all, leave the value as-is
       }
-      filtered = malikFiltered;
     }
 
     // 5. IQR filter
