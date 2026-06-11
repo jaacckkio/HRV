@@ -283,18 +283,26 @@ class _MeasurementScreenState extends State<MeasurementScreen>
 
     WakelockPlus.disable();
 
-    if (mounted && _sessionRRIntervals.isNotEmpty) {
-      final hrvResult = HrvCalculator.compute(_sessionRRIntervals);
-      Navigator.pushReplacement(
-        context,
-        MaterialPageRoute(
-          builder: (_) => ResultsScreen(
-            hrvResult: hrvResult,
-            rrIntervals: List<double>.from(_sessionRRIntervals),
+    if (mounted && _ppgService != null) {
+      final finalResult = _ppgService!.computeFinalRRIntervals();
+      final rrIntervals = finalResult.rrIntervals;
+
+      if (rrIntervals.isNotEmpty) {
+        final hrvResult = HrvCalculator.compute(
+          rrIntervals,
+          selectedMovingAvgWindow: finalResult.selectedWindowSec,
+        );
+        Navigator.pushReplacement(
+          context,
+          MaterialPageRoute(
+            builder: (_) => ResultsScreen(
+              hrvResult: hrvResult,
+              rrIntervals: List<double>.from(rrIntervals),
+            ),
           ),
-        ),
-      );
-      return;
+        );
+        return;
+      }
     }
 
     if (mounted) {

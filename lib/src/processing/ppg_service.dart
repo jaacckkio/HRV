@@ -1,4 +1,3 @@
-import 'dart:math' as math;
 import 'package:camera/camera.dart';
 import '../models/ppg_signal.dart';
 import '../models/ppg_config.dart';
@@ -25,20 +24,16 @@ class PPGService {
 
   late RingBuffer<double> _rawBuffer;
   late RingBuffer<double> _filteredBuffer;
-  late PeakDetector _adaptivePeakDetector;
-  int _adaptiveMinDistance = 0;
-  double _adaptiveMinProminence = 0.5;
+  final List<double> _fullFilteredSignal = [];
+  static const PeakDetector _peakDetector = PeakDetector();
   final Stopwatch _frameStopwatch = Stopwatch();
   bool _buffersResized = false;
   int _lastReportedPeakCount = 0;
-  final List<double> _recentRRsForAdaptive = [];
-  final List<double> _recentValidRRs = [];
   ButterworthBandpassFilter? _butterworthFilter;
 
   PPGService({
     this.config = const PPGConfig(),
     SignalProcessor? processor,
-    PeakDetector? peakDetector,
     SignalQualityAssessor? qualityAssessor,
     OutlierFilter? outlierFilter,
     FrameRateDetector? frameRateDetector,
@@ -53,22 +48,15 @@ class PPGService {
     int capacity = (config.samplingRate * config.windowSizeSeconds).round();
     _rawBuffer = RingBuffer<double>(capacity);
     _filteredBuffer = RingBuffer<double>(capacity);
-    _adaptiveMinDistance =
-        _minDistanceFromFps(config.samplingRate.toDouble());
-    _adaptivePeakDetector = PeakDetector(
-      minProminence: _adaptiveMinProminence,
-      minDistance: _adaptiveMinDistance,
-    );
   }
 
   void dispose() {
     _rawBuffer.clear();
     _filteredBuffer.clear();
+    _fullFilteredSignal.clear();
     _frameRateDetector.reset();
     _frameStopwatch.stop();
     _lastReportedPeakCount = 0;
-    _recentRRsForAdaptive.clear();
-    _recentValidRRs.clear();
     _butterworthFilter?.reset();
     _butterworthFilter = null;
   }
@@ -77,12 +65,11 @@ class PPGService {
   void reset() {
     _rawBuffer.clear();
     _filteredBuffer.clear();
+    _fullFilteredSignal.clear();
     _frameRateDetector.reset();
     _frameStopwatch.stop();
     _buffersResized = false;
     _lastReportedPeakCount = 0;
-    _recentRRsForAdaptive.clear();
-    _recentValidRRs.clear();
     _butterworthFilter?.reset();
     _butterworthFilter = null;
   }
@@ -93,9 +80,8 @@ class PPGService {
   void clearSignalBuffers() {
     _rawBuffer.clear();
     _filteredBuffer.clear();
+    _fullFilteredSignal.clear();
     _lastReportedPeakCount = 0;
-    _recentRRsForAdaptive.clear();
-    _recentValidRRs.clear();
     _butterworthFilter?.reset();
   }
 
@@ -178,6 +164,7 @@ class PPGService {
       }
     }
     _filteredBuffer.add(filteredPoint);
+    _fullFilteredSignal.add(filteredPoint);
 
     // If quality is poor or FPS not stable, return early
     if (quality == SignalQuality.poor || !_frameRateDetector.isStable) {
@@ -195,17 +182,11 @@ class PPGService {
       );
     }
 
-    // Detect peaks
+    // Detect peaks using HeartPy-style moving-average ROI method
     final filteredWindow = _filteredBuffer.toList;
-    final dynamicProminence = _dynamicMinProminence(filteredWindow);
-    _updateAdaptivePeakDetector(effectiveFPS, dynamicProminence);
-    // Find integer peaks, merge dicrotic notches, then interpolate
-    final rawPeakIndices = _adaptivePeakDetector.findPeaks(filteredWindow);
-    final mergeDistanceFrames = (0.6 * effectiveFPS).round();
-    final peakIndices = PeakDetector.mergeDicroticNotches(
-        rawPeakIndices, filteredWindow, mergeDistanceFrames);
-    final interpolatedPeaks = PeakDetector.interpolateExistingPeaks(
-        peakIndices, filteredWindow);
+    final roiResult = PeakDetector.findPeaksROI(filteredWindow, effectiveFPS);
+    final peakIndices = roiResult.peakIndices;
+    final interpolatedPeaks = roiResult.interpolatedPeaks;
 
     // Extract and validate RR intervals — only return NEW ones
     List<double> rrIntervals = [];
@@ -214,7 +195,7 @@ class PPGService {
     RRAnalysisResult rrAnalysis = _rrAnalyzer.analyze(const <double>[]);
 
     if (interpolatedPeaks.length >= 2) {
-      final rawRRs = _adaptivePeakDetector.peaksToRRIntervalsInterpolated(
+      final rawRRs = _peakDetector.peaksToRRIntervalsInterpolated(
           interpolatedPeaks, effectiveFPS);
 
       // Only emit RR intervals corresponding to newly detected peaks.
@@ -228,32 +209,8 @@ class PPGService {
         filterResult = _outlierFilter.filterOutliersWithStats(newRRs);
         rrIntervals = filterResult.intervals;
         rrAnalysis = _rrAnalyzer.analyze(rrIntervals);
-
-        // Collect valid RR intervals for adaptive min distance
-        _recentRRsForAdaptive.addAll(rrIntervals);
-        _updateAdaptiveMinDistance(effectiveFPS);
       }
       _lastReportedPeakCount = interpolatedPeaks.length;
-    }
-
-    // Track recent valid RR intervals for adaptive min distance (ratchet-up only)
-    for (final rr in rrIntervals) {
-      _recentValidRRs.add(rr);
-      if (_recentValidRRs.length > 30) _recentValidRRs.removeAt(0);
-    }
-
-    if (_recentValidRRs.length >= 5) {
-      final sorted = List<double>.from(_recentValidRRs)..sort();
-      final medianRR = sorted[sorted.length ~/ 2];
-      final adaptiveMinDistanceMs = medianRR * 0.7;
-      final adaptiveMinDistanceFrames = (adaptiveMinDistanceMs / 1000.0 * effectiveFPS).round();
-      if (adaptiveMinDistanceFrames > _adaptiveMinDistance) {
-        _adaptiveMinDistance = adaptiveMinDistanceFrames;
-        _adaptivePeakDetector = PeakDetector(
-          minProminence: _adaptiveMinProminence,
-          minDistance: _adaptiveMinDistance,
-        );
-      }
     }
 
     return PPGSignal(
@@ -272,6 +229,25 @@ class PPGService {
       rejectionRatio: filterResult.rejectionRatio,
       rejectedIntervalCount: filterResult.rejectedCount,
       fingerDetected: fingerDetected,
+    );
+  }
+
+  /// Run ROI peak detection ONCE on the full filtered signal and return
+  /// the final RR-interval series plus the selected window size.
+  /// Call at end-of-measurement for the definitive HRV computation.
+  ({List<double> rrIntervals, double selectedWindowSec}) computeFinalRRIntervals() {
+    final fps = _effectiveFrameRate();
+    if (_fullFilteredSignal.length < 3 || fps <= 0) {
+      return (rrIntervals: <double>[], selectedWindowSec: 0.75);
+    }
+
+    final roiResult = PeakDetector.findPeaksROI(_fullFilteredSignal, fps);
+    final rrIntervals = _peakDetector.peaksToRRIntervalsInterpolated(
+        roiResult.interpolatedPeaks, fps);
+
+    return (
+      rrIntervals: rrIntervals,
+      selectedWindowSec: roiResult.selectedWindowSec,
     );
   }
 
@@ -317,85 +293,9 @@ class PPGService {
     _buffersResized = true;
   }
 
-  void _updateAdaptivePeakDetector(double fps,
-      [double? minProminenceOverride]) {
-    // Only use the default min distance if no adaptive distance has been set yet
-    final minDistanceFrames = _recentRRsForAdaptive.length >= 5
-        ? _adaptiveMinDistance
-        : _minDistanceFromFps(fps);
-    final minProminence = minProminenceOverride ?? _adaptiveMinProminence;
-    final prominenceChanged =
-        (minProminence - _adaptiveMinProminence).abs() >= 0.05;
-    if (minDistanceFrames == _adaptiveMinDistance && !prominenceChanged) return;
-
-    _adaptivePeakDetector = PeakDetector(
-      minProminence: minProminence,
-      minDistance: minDistanceFrames,
-    );
-    _adaptiveMinDistance = minDistanceFrames;
-    _adaptiveMinProminence = minProminence;
-  }
-
-  int _minDistanceFromFps(double fps) {
-    // Use 500ms default (120 BPM ceiling) instead of config.minRRMs (300ms)
-    // to reduce false peaks between real heartbeats
-    const defaultMinRRMs = 500.0;
-    int minDistanceFrames = (fps * (defaultMinRRMs / 1000.0)).round();
-    if (minDistanceFrames < 1) minDistanceFrames = 1;
-    return minDistanceFrames;
-  }
-
-  void _updateAdaptiveMinDistance(double fps) {
-    if (_recentRRsForAdaptive.length < 5) return;
-
-    // Compute median RR interval in ms
-    final sorted = List<double>.from(_recentRRsForAdaptive)..sort();
-    final medianRR = sorted[sorted.length ~/ 2];
-
-    // Set min distance to 70% of median RR in frames
-    final medianFrames = medianRR / 1000.0 * fps;
-    int adaptiveDistance = (medianFrames * 0.7).round();
-    if (adaptiveDistance < 1) adaptiveDistance = 1;
-
-    if (adaptiveDistance != _adaptiveMinDistance) {
-      _adaptivePeakDetector = PeakDetector(
-        minProminence: _adaptiveMinProminence,
-        minDistance: adaptiveDistance,
-      );
-      _adaptiveMinDistance = adaptiveDistance;
-    }
-  }
-
   int _nowMicros() {
     if (!_frameStopwatch.isRunning) _frameStopwatch.start();
     return _frameStopwatch.elapsedMicroseconds;
   }
 
-  double _dynamicMinProminence(List<double> signal) {
-    if (signal.length < 10) {
-      return _adaptiveMinProminence > 0.0
-          ? _adaptiveMinProminence
-          : 0.5;
-    }
-    final start = signal.length > 60 ? signal.length - 60 : 0;
-    final stdDev = _calculateStdDev(signal.sublist(start));
-    final computed = stdDev * 1.0;
-    return computed < 0.5 ? 0.5 : computed;
-  }
-
-  double _calculateStdDev(List<double> values) {
-    if (values.isEmpty) return 0.0;
-    double sum = 0.0;
-    for (final v in values) {
-      sum += v;
-    }
-    final mean = sum / values.length;
-    double varianceSum = 0.0;
-    for (final v in values) {
-      final diff = v - mean;
-      varianceSum += diff * diff;
-    }
-    final variance = varianceSum / values.length;
-    return variance <= 0.0 ? 0.0 : math.sqrt(variance);
-  }
 }

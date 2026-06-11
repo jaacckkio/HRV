@@ -165,6 +165,7 @@ class ResultsScreen extends StatelessWidget {
           _debugLine('Clean intervals', '${r.cleanIntervalCount}'),
           _debugLine('Artifact ratio', '${(r.artifactRatio * 100).toStringAsFixed(1)}%'),
           _debugLine('Valid adjacent pairs (RMSSD)', '${r.validPairCount}'),
+          _debugLine('ROI window (s)', r.selectedMovingAvgWindow.toStringAsFixed(2)),
           _debugLine('RMSSD', '${r.rmssd.toStringAsFixed(1)} ms'),
         ],
       ),

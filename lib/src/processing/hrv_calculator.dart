@@ -19,6 +19,7 @@ class HrvResult {
   final int removedByPercentile;
   final int cleanIntervalCount;
   final int validPairCount;
+  final double selectedMovingAvgWindow;
 
   const HrvResult({
     required this.meanRR,
@@ -37,13 +38,15 @@ class HrvResult {
     this.removedByPercentile = 0,
     this.cleanIntervalCount = 0,
     this.validPairCount = 0,
+    this.selectedMovingAvgWindow = 0.0,
   });
 }
 
 class HrvCalculator {
   const HrvCalculator._();
 
-  static HrvResult compute(List<double> rrIntervals) {
+  static HrvResult compute(List<double> rrIntervals,
+      {double selectedMovingAvgWindow = 0.0}) {
     if (rrIntervals.length < 2) {
       final n = rrIntervals.length;
       return HrvResult(
@@ -157,6 +160,7 @@ class HrvCalculator {
       removedByPercentile: filtered.removedStep3,
       cleanIntervalCount: n,
       validPairCount: validPairCount,
+      selectedMovingAvgWindow: selectedMovingAvgWindow,
     );
   }
 }
