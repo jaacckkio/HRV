@@ -1,15 +1,24 @@
 import 'package:flutter/material.dart';
 import '../processing/hrv_calculator.dart';
 import 'measurement_screen.dart';
+import 'widgets/full_signal_chart.dart';
 
 class ResultsScreen extends StatelessWidget {
   final HrvResult hrvResult;
   final List<double> rrIntervals;
 
+  // DEV TOOLING — optional full-signal data for replay visualisation
+  final List<double>? fullFilteredSignal;
+  final List<int>? fullPeakIndices;
+  final double? signalFps;
+
   const ResultsScreen({
     super.key,
     required this.hrvResult,
     required this.rrIntervals,
+    this.fullFilteredSignal,
+    this.fullPeakIndices,
+    this.signalFps,
   });
 
   static const _primary = Color(0xFF02427A);
@@ -85,6 +94,24 @@ class ResultsScreen extends StatelessWidget {
             ),
             const SizedBox(height: 16),
             _buildArtifactDebugPanel(),
+            // DEV TOOLING — full-signal chart with peak markers
+            if (fullFilteredSignal != null &&
+                fullFilteredSignal!.isNotEmpty &&
+                signalFps != null) ...[
+              const SizedBox(height: 16),
+              Container(
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF1C1F2A),
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: FullSignalChart(
+                  signal: fullFilteredSignal!,
+                  peakIndices: fullPeakIndices ?? [],
+                  fps: signalFps!,
+                ),
+              ),
+            ],
             const SizedBox(height: 24),
             const Text(
               'This is not a medical device. Results are for wellness purposes '

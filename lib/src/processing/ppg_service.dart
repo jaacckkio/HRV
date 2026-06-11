@@ -31,6 +31,16 @@ class PPGService {
   int _lastReportedPeakCount = 0;
   ButterworthBandpassFilter? _butterworthFilter;
 
+  // DEV TOOLING — last-frame data exposed for recording
+  int _lastFrameMicros = 0;
+  double _lastMeanR = 0, _lastMeanG = 0, _lastMeanB = 0;
+
+  int get lastFrameMicros => _lastFrameMicros;
+  double get lastMeanR => _lastMeanR;
+  double get lastMeanG => _lastMeanG;
+  double get lastMeanB => _lastMeanB;
+  double get effectiveFPS => _effectiveFrameRate();
+
   PPGService({
     this.config = const PPGConfig(),
     SignalProcessor? processor,
@@ -74,6 +84,17 @@ class PPGService {
     _butterworthFilter = null;
   }
 
+  /// DEV TOOLING — force the frame-rate detector to a known FPS and
+  /// immediately initialise the Butterworth filter at that rate.
+  /// Call before feeding any samples during replay so the filter,
+  /// buffer sizing, and all FPS-dependent gates match the live session
+  /// from frame 0 — no warmup phase, no detection ambiguity.
+  void setDeterministicFPS(double fps) {
+    _frameRateDetector.setDeterministicFPS(fps);
+    _resizeBuffersIfNeeded(fps);
+    _butterworthFilter ??= ButterworthBandpassFilter(sampleRate: fps);
+  }
+
   /// Clear signal buffers and peak tracking state.
   /// Call when starting a new measurement phase to discard stale data.
   /// Preserves frame rate detection (which took time to stabilise).
@@ -87,42 +108,66 @@ class PPGService {
 
   /// Process a single camera frame synchronously and return the current signal state.
   PPGSignal processSingleFrame(CameraImage image) {
-    final now = DateTime.now();
-
     // Record frame timing
-    _frameRateDetector.recordFrameMicros(_nowMicros());
-    final effectiveFPS = _effectiveFrameRate();
-    _resizeBuffersIfNeeded(effectiveFPS);
+    final micros = _nowMicros();
+    _frameRateDetector.recordFrameMicros(micros);
+    final fps = _effectiveFrameRate();
+    _resizeBuffersIfNeeded(fps);
 
-    // Extract RGB means (single pixel iteration) and derive HSV Value as PPG signal
-    double intensity;
+    // Extract RGB means (single pixel iteration)
     double meanR = 0, meanG = 0, meanB = 0;
     try {
       final rgb = _processor.extractRGBMeans(image);
       meanR = rgb.meanR;
       meanG = rgb.meanG;
       meanB = rgb.meanB;
-      // HSV Value (brightness) as PPG signal — validated by HRV4Training
-      intensity = SignalProcessor.rgbToHsvValue(meanR, meanG, meanB);
     } catch (e) {
       return PPGSignal(
         rawIntensity: 0.0,
         filteredIntensity: 0.0,
         rrIntervals: [],
         quality: SignalQuality.poor,
-        timestamp: now,
+        timestamp: DateTime.now(),
         frameRate: _frameRateDetector.fps,
         isFPSStable: _frameRateDetector.isStable,
         fingerDetected: false,
       );
     }
 
+    // Store for recording
+    _lastFrameMicros = micros;
+    _lastMeanR = meanR;
+    _lastMeanG = meanG;
+    _lastMeanB = meanB;
+
+    return _processExtractedData(meanR, meanG, meanB, fps);
+  }
+
+  /// DEV TOOLING — process a pre-extracted sample for replay.
+  /// Follows the exact same pipeline as processSingleFrame.
+  PPGSignal processReplaySample(
+      int timestampMicros, double meanR, double meanG, double meanB) {
+    _frameRateDetector.recordFrameMicros(timestampMicros);
+    final fps = _effectiveFrameRate();
+    _resizeBuffersIfNeeded(fps);
+    return _processExtractedData(meanR, meanG, meanB, fps);
+  }
+
+  /// Shared processing pipeline for both live frames and replay samples.
+  PPGSignal _processExtractedData(
+      double meanR, double meanG, double meanB, double effectiveFPS) {
+    final now = DateTime.now();
+
+    // HSV Value (brightness) as PPG signal — validated by HRV4Training
+    final intensity = SignalProcessor.rgbToHsvValue(meanR, meanG, meanB);
+
     _rawBuffer.add(intensity);
 
     // Need minimum samples before we can do anything useful
     final minSamples = effectiveFPS.round();
     if (!_rawBuffer.isFull && _rawBuffer.length < minSamples) {
-      final fingerDetected = _qualityAssessor.isFingerPresentByColor(meanR, meanG, meanB);
+      final fingerDetected =
+          _qualityAssessor.isFingerPresentByColor(meanR, meanG, meanB);
       return PPGSignal(
         rawIntensity: intensity,
         filteredIntensity: 0.0,
@@ -148,7 +193,8 @@ class PPGService {
 
     // Apply Butterworth bandpass filter (0.5–8 Hz)
     if (_butterworthFilter == null && _frameRateDetector.isStable) {
-      _butterworthFilter = ButterworthBandpassFilter(sampleRate: _frameRateDetector.fps);
+      _butterworthFilter =
+          ButterworthBandpassFilter(sampleRate: _frameRateDetector.fps);
     }
 
     double filteredPoint;
@@ -233,12 +279,24 @@ class PPGService {
   }
 
   /// Run ROI peak detection ONCE on the full filtered signal and return
-  /// the final RR-interval series plus the selected window size.
+  /// the final RR-interval series, selected window, filtered signal, and peaks.
   /// Call at end-of-measurement for the definitive HRV computation.
-  ({List<double> rrIntervals, double selectedWindowSec}) computeFinalRRIntervals() {
+  ({
+    List<double> rrIntervals,
+    double selectedWindowSec,
+    List<double> filteredSignal,
+    List<int> peakIndices,
+    List<double> interpolatedPeaks,
+  }) computeFinalRRIntervals() {
     final fps = _effectiveFrameRate();
     if (_fullFilteredSignal.length < 3 || fps <= 0) {
-      return (rrIntervals: <double>[], selectedWindowSec: 0.75);
+      return (
+        rrIntervals: <double>[],
+        selectedWindowSec: 0.75,
+        filteredSignal: <double>[],
+        peakIndices: <int>[],
+        interpolatedPeaks: <double>[],
+      );
     }
 
     final roiResult = PeakDetector.findPeaksROI(_fullFilteredSignal, fps);
@@ -248,6 +306,9 @@ class PPGService {
     return (
       rrIntervals: rrIntervals,
       selectedWindowSec: roiResult.selectedWindowSec,
+      filteredSignal: List<double>.from(_fullFilteredSignal),
+      peakIndices: roiResult.peakIndices,
+      interpolatedPeaks: roiResult.interpolatedPeaks,
     );
   }
 

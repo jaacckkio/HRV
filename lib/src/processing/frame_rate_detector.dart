@@ -13,11 +13,16 @@ class FrameRateDetector {
   double _detectedFPS = _defaultFPS;
   bool _isStable = false;
   int _lowFpsStreak = 0;
+  bool _deterministic = false;
 
   double get fps => _detectedFPS;
   bool get isStable => _isStable;
 
   void recordFrameMicros(int timestampMicros) {
+    // In deterministic mode (replay), skip detection entirely —
+    // FPS and isStable are already set and must not drift.
+    if (_deterministic) return;
+
     if (_lastFrameMicros != null) {
       final intervalMs = (timestampMicros - _lastFrameMicros!) / 1000.0;
 
@@ -72,5 +77,16 @@ class FrameRateDetector {
     _detectedFPS = _defaultFPS;
     _isStable = false;
     _lowFpsStreak = 0;
+    _deterministic = false;
+  }
+
+  /// DEV TOOLING — force a known FPS and mark as immediately stable.
+  /// Used during replay to guarantee bit-for-bit identical processing
+  /// by bypassing the warmup/detection phase entirely.
+  void setDeterministicFPS(double fps) {
+    _detectedFPS = fps;
+    _isStable = true;
+    _lowFpsStreak = 0;
+    _deterministic = true;
   }
 }

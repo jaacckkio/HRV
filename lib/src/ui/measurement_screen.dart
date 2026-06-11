@@ -8,6 +8,7 @@ import '../processing/ppg_service.dart';
 import '../processing/hrv_calculator.dart';
 import '../models/ppg_signal.dart';
 import '../camera/camera_control.dart';
+import '../recording/ppg_recording.dart';
 import 'widgets/waveform_painter.dart';
 import 'widgets/finger_guide_animation.dart';
 import 'results_screen.dart';
@@ -50,6 +51,13 @@ class _MeasurementScreenState extends State<MeasurementScreen>
   List<int> _currentPeakIndices = [];
   static const int _historyLimit = 150;
   static const int _bpmWindowSize = 8;
+
+  // DEV TOOLING — recording state
+  bool _isRecording = false;
+  bool _isReplaying = false;
+  final List<PPGFrameSample> _recordedSamples = [];
+  int _recordClearAtFrame = -1;
+  String? _recordStartWallClock;
 
   @override
   void initState() {
@@ -120,6 +128,10 @@ class _MeasurementScreenState extends State<MeasurementScreen>
       _exposureLocked = false;
       _nativeLockResult = null;
       _measuringStartTime = null;
+      // Recording
+      _recordedSamples.clear();
+      _recordClearAtFrame = -1;
+      _recordStartWallClock = null;
     });
 
     _countdownController?.dispose();
@@ -174,6 +186,16 @@ class _MeasurementScreenState extends State<MeasurementScreen>
       final signal = _ppgService!.processSingleFrame(image);
       _currentSignal = signal;
 
+      // DEV TOOLING — capture per-frame data for recording
+      if (_isRecording) {
+        _recordedSamples.add(PPGFrameSample(
+          t: _ppgService!.lastFrameMicros,
+          r: _ppgService!.lastMeanR,
+          g: _ppgService!.lastMeanG,
+          b: _ppgService!.lastMeanB,
+        ));
+      }
+
       // Accumulate visualization data
       _rawHistory.add(signal.rawIntensity);
       _filteredHistory.add(signal.filteredIntensity);
@@ -211,11 +233,21 @@ class _MeasurementScreenState extends State<MeasurementScreen>
             'wb=${_nativeLockResult!.whiteBalanceLocked} '
             'err=${_nativeLockResult!.error}');
         _ppgService?.clearSignalBuffers();
+        // DEV TOOLING — mark clear point
+        if (_isRecording) {
+          _recordClearAtFrame = _recordedSamples.length;
+        }
         _status = 'Measuring...';
       }
 
       // === Phase 3: Measuring (exposure locked, collecting data) ===
       _measuringStartTime ??= DateTime.now();
+
+      // DEV TOOLING — capture wall-clock start for Polar alignment
+      if (_isRecording) {
+        _recordStartWallClock ??=
+            DateTime.now().toUtc().toIso8601String();
+      }
 
       final measuringElapsed = DateTime.now().difference(_measuringStartTime!);
       if (measuringElapsed.inMilliseconds <= 5000) {
@@ -280,12 +312,21 @@ class _MeasurementScreenState extends State<MeasurementScreen>
           rrIntervals,
           selectedMovingAvgWindow: finalResult.selectedWindowSec,
         );
+
+        // DEV TOOLING — save recording if enabled
+        if (_isRecording && _recordedSamples.isNotEmpty) {
+          _saveRecording(finalResult);
+        }
+
         Navigator.pushReplacement(
           context,
           MaterialPageRoute(
             builder: (_) => ResultsScreen(
               hrvResult: hrvResult,
               rrIntervals: List<double>.from(rrIntervals),
+              fullFilteredSignal: finalResult.filteredSignal,
+              fullPeakIndices: finalResult.peakIndices,
+              signalFps: _ppgService!.effectiveFPS,
             ),
           ),
         );
@@ -299,6 +340,135 @@ class _MeasurementScreenState extends State<MeasurementScreen>
       });
     }
     _isTransitioning = false;
+  }
+
+  /// DEV TOOLING — save the recording to JSON.
+  void _saveRecording(
+    // The final result from computeFinalRRIntervals
+    ({
+      List<double> rrIntervals,
+      double selectedWindowSec,
+      List<double> filteredSignal,
+      List<int> peakIndices,
+      List<double> interpolatedPeaks,
+    }) finalResult,
+  ) {
+    final fps = _ppgService?.effectiveFPS ?? 24.0;
+
+    // Build RR beats with wall-clock offsets for Polar alignment
+    final beats = <RRBeat>[];
+    final peaks = finalResult.interpolatedPeaks;
+    final rrList = finalResult.rrIntervals;
+    for (int i = 0; i < peaks.length; i++) {
+      final offsetMs = (peaks[i] / fps) * 1000.0;
+      final rrMs = i > 0 && i - 1 < rrList.length ? rrList[i - 1] : 0.0;
+      beats.add(RRBeat(beatOffsetMs: offsetMs, rrMs: rrMs));
+    }
+
+    final recording = PPGRecording(
+      startWallClockUtc:
+          _recordStartWallClock ?? DateTime.now().toUtc().toIso8601String(),
+      fps: fps,
+      clearBufferAtFrame: _recordClearAtFrame,
+      samples: List.from(_recordedSamples),
+      finalRRIntervals: beats,
+    );
+
+    recording.save().then((_) {
+      debugPrint(
+          'Recording saved: ${_recordedSamples.length} frames, '
+          '${beats.length} beats → ${PPGRecording.filePath}');
+    }).catchError((e) {
+      debugPrint('Failed to save recording: $e');
+    });
+  }
+
+  /// DEV TOOLING — replay the last recording through the same pipeline.
+  Future<void> _replayRecording() async {
+    if (_isReplaying || _isScanning) return;
+    setState(() {
+      _isReplaying = true;
+      _status = 'Loading recording...';
+    });
+
+    final recording = await PPGRecording.load();
+    if (recording == null) {
+      if (mounted) {
+        setState(() {
+          _isReplaying = false;
+          _status = 'No recording found.';
+        });
+      }
+      return;
+    }
+
+    setState(() => _status = 'Replaying ${recording.samples.length} frames...');
+
+    // Run replay in a microtask to avoid blocking the UI thread entirely
+    await Future.delayed(const Duration(milliseconds: 50));
+
+    final replayService = PPGService();
+    // Force the stored FPS so the Butterworth filter, buffer sizing, and
+    // all FPS-dependent gates match the live session from frame 0.
+    replayService.setDeterministicFPS(recording.fps);
+
+    try {
+      for (int i = 0; i < recording.samples.length; i++) {
+        final s = recording.samples[i];
+        replayService.processReplaySample(s.t, s.r, s.g, s.b);
+
+        // Clear at the same point as the live measurement
+        if (recording.clearBufferAtFrame > 0 &&
+            i == recording.clearBufferAtFrame - 1) {
+          replayService.clearSignalBuffers();
+        }
+      }
+
+      final finalResult = replayService.computeFinalRRIntervals();
+      final rrIntervals = finalResult.rrIntervals;
+
+      if (rrIntervals.isEmpty) {
+        if (mounted) {
+          setState(() {
+            _isReplaying = false;
+            _status = 'Replay produced no heartbeats.';
+          });
+        }
+        replayService.dispose();
+        return;
+      }
+
+      final hrvResult = HrvCalculator.compute(
+        rrIntervals,
+        selectedMovingAvgWindow: finalResult.selectedWindowSec,
+      );
+
+      replayService.dispose();
+
+      if (mounted) {
+        Navigator.pushReplacement(
+          context,
+          MaterialPageRoute(
+            builder: (_) => ResultsScreen(
+              hrvResult: hrvResult,
+              rrIntervals: List<double>.from(rrIntervals),
+              fullFilteredSignal: finalResult.filteredSignal,
+              fullPeakIndices: finalResult.peakIndices,
+              signalFps: recording.fps,
+            ),
+          ),
+        );
+      }
+    } catch (e) {
+      debugPrint('Replay error: $e');
+      replayService.dispose();
+      if (mounted) {
+        setState(() {
+          _isReplaying = false;
+          _status = 'Replay failed: $e';
+        });
+      }
+    }
   }
 
   void _showHelpOverlay() {
@@ -435,7 +605,7 @@ class _MeasurementScreenState extends State<MeasurementScreen>
                           ),
                           Text(
                             'FPS: ${fps.toStringAsFixed(0)} '
-                            '${fpsStable ? "✓" : "⏳"} | '
+                            '${fpsStable ? "\u2713" : "\u23f3"} | '
                             'Rej: ${(rejRatio * 100).toStringAsFixed(0)}% | '
                             'RRs: ${_sessionRRIntervals.length}',
                             style:
@@ -443,9 +613,9 @@ class _MeasurementScreenState extends State<MeasurementScreen>
                           ),
                           if (_nativeLockResult != null)
                             Text(
-                              'ExpLock: ${_nativeLockResult!.exposureLocked ? "✓" : "✗"} | '
-                              'FocLock: ${_nativeLockResult!.focusLocked ? "✓" : "✗"} | '
-                              'WBLock: ${_nativeLockResult!.whiteBalanceLocked ? "✓" : "✗"}',
+                              'ExpLock: ${_nativeLockResult!.exposureLocked ? "\u2713" : "\u2717"} | '
+                              'FocLock: ${_nativeLockResult!.focusLocked ? "\u2713" : "\u2717"} | '
+                              'WBLock: ${_nativeLockResult!.whiteBalanceLocked ? "\u2713" : "\u2717"}',
                               style:
                                   const TextStyle(fontSize: 11, color: Colors.grey),
                             ),
@@ -454,11 +624,15 @@ class _MeasurementScreenState extends State<MeasurementScreen>
                     ),
                   ],
                 ),
-                const SizedBox(height: 16),
+                const SizedBox(height: 8),
+
+                // DEV TOOLING — Record / Replay / Share buttons
+                _buildDevToolbar(),
+                const SizedBox(height: 8),
 
                 // Waveforms
                 _buildWaveformCard(
-                    'Raw Signal (Red Channel)', _rawHistory, Colors.red.shade300, []),
+                    'Raw Signal (HSV Value)', _rawHistory, Colors.red.shade300, []),
                 const SizedBox(height: 10),
                 _buildWaveformCard('Filtered Signal (Bandpass)', _filteredHistory,
                     Colors.greenAccent, _currentPeakIndices),
@@ -475,8 +649,8 @@ class _MeasurementScreenState extends State<MeasurementScreen>
         ],
       ),
       floatingActionButton: FloatingActionButton.extended(
-        onPressed: _isTransitioning ? null : _toggleScanning,
-        backgroundColor: _isTransitioning
+        onPressed: (_isTransitioning || _isReplaying) ? null : _toggleScanning,
+        backgroundColor: (_isTransitioning || _isReplaying)
             ? Colors.grey
             : (_isScanning ? Colors.red : const Color(0xFF06A3B7)),
         icon: Icon(_isScanning ? Icons.stop : Icons.play_arrow),
@@ -486,6 +660,69 @@ class _MeasurementScreenState extends State<MeasurementScreen>
         ),
       ),
       floatingActionButtonLocation: FloatingActionButtonLocation.centerFloat,
+    );
+  }
+
+  // DEV TOOLING — toolbar with Record toggle, Replay, and file-access hint
+  Widget _buildDevToolbar() {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+      decoration: BoxDecoration(
+        color: const Color(0xFFFFF8E1),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: const Color(0xFFFFCC02)),
+      ),
+      child: Row(
+        children: [
+          const Text('REC',
+              style: TextStyle(
+                  fontSize: 10,
+                  fontWeight: FontWeight.bold,
+                  color: Color(0xFF6D4C00))),
+          const SizedBox(width: 4),
+          SizedBox(
+            height: 24,
+            child: Switch(
+              value: _isRecording,
+              onChanged: _isScanning
+                  ? null
+                  : (v) => setState(() => _isRecording = v),
+              activeColor: Colors.red,
+              materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+            ),
+          ),
+          const SizedBox(width: 8),
+          _devButton('Replay', _isScanning || _isReplaying ? null : _replayRecording),
+          const SizedBox(width: 6),
+          Expanded(
+            child: Text(
+              _isRecording ? 'Recording ON' : 'Files app: On My iPhone > Vagal HRV Camera',
+              style: const TextStyle(fontSize: 9, color: Color(0xFF6D4C00)),
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _devButton(String label, VoidCallback? onTap) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+        decoration: BoxDecoration(
+          color: onTap != null
+              ? const Color(0xFF06A3B7)
+              : Colors.grey.shade400,
+          borderRadius: BorderRadius.circular(6),
+        ),
+        child: Text(label,
+            style: const TextStyle(
+                fontSize: 10,
+                fontWeight: FontWeight.bold,
+                color: Colors.white)),
+      ),
     );
   }
 
