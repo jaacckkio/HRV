@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
+import 'package:path_provider/path_provider.dart';
 
 /// DEV TOOLING — record-and-replay for offline detector iteration.
 /// Remove when no longer needed.
@@ -48,6 +49,8 @@ class RRBeat {
       );
 }
 
+const String _fileName = 'ppg_recording_latest.json';
+
 /// Full recording: raw samples + metadata + final results.
 class PPGRecording {
   final String startWallClockUtc;
@@ -85,24 +88,24 @@ class PPGRecording {
             .toList(),
       );
 
-  /// App Documents directory — resolved from systemTemp to handle symlinks.
-  static String get _documentsDir {
-    final resolved = Directory.systemTemp.resolveSymbolicLinksSync();
-    return '${Directory(resolved).parent.path}/Documents';
+  /// Resolve the real iOS NSDocumentDirectory via path_provider.
+  /// This is the directory UIFileSharingEnabled exposes in the Files app.
+  static Future<String> _resolveFilePath() async {
+    final dir = await getApplicationDocumentsDirectory();
+    return '${dir.path}/$_fileName';
   }
-
-  static String get filePath => '$_documentsDir/ppg_recording_latest.json';
 
   /// Write recording to the app documents directory.
   Future<void> save() async {
-    final file = File(filePath);
-    await file.parent.create(recursive: true);
+    final path = await _resolveFilePath();
+    final file = File(path);
     await file.writeAsString(jsonEncode(toJson()));
   }
 
   /// Load recording from the app documents directory. Returns null if absent.
   static Future<PPGRecording?> load() async {
-    final file = File(filePath);
+    final path = await _resolveFilePath();
+    final file = File(path);
     if (!await file.exists()) return null;
     try {
       final json =
@@ -114,5 +117,8 @@ class PPGRecording {
   }
 
   /// Check if a recording file exists.
-  static Future<bool> exists() => File(filePath).exists();
+  static Future<bool> exists() async {
+    final path = await _resolveFilePath();
+    return File(path).exists();
+  }
 }

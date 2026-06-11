@@ -377,7 +377,7 @@ class _MeasurementScreenState extends State<MeasurementScreen>
     recording.save().then((_) {
       debugPrint(
           'Recording saved: ${_recordedSamples.length} frames, '
-          '${beats.length} beats → ${PPGRecording.filePath}');
+          '${beats.length} beats');
     }).catchError((e) {
       debugPrint('Failed to save recording: $e');
     });
