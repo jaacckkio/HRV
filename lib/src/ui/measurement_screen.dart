@@ -7,6 +7,7 @@ import 'package:wakelock_plus/wakelock_plus.dart';
 import '../processing/ppg_service.dart';
 import '../processing/hrv_calculator.dart';
 import '../models/ppg_signal.dart';
+import '../camera/camera_control.dart';
 import 'widgets/waveform_painter.dart';
 import 'widgets/finger_guide_animation.dart';
 import 'results_screen.dart';
@@ -34,6 +35,7 @@ class _MeasurementScreenState extends State<MeasurementScreen>
   bool _fingerFirstDetected = false;
   DateTime? _fingerDetectedTime;
   bool _exposureLocked = false;
+  CameraLockResult? _nativeLockResult;
   DateTime? _measuringStartTime;
   bool _showingHelp = false;
   int _selectedDuration = 60; // seconds
@@ -116,6 +118,7 @@ class _MeasurementScreenState extends State<MeasurementScreen>
       _fingerFirstDetected = false;
       _fingerDetectedTime = null;
       _exposureLocked = false;
+      _nativeLockResult = null;
       _measuringStartTime = null;
     });
 
@@ -198,20 +201,15 @@ class _MeasurementScreenState extends State<MeasurementScreen>
           return;
         }
 
-        // 2 seconds have passed — lock exposure now
+        // 2 seconds have passed — lock exposure, focus, and white balance
+        // via native AVFoundation for reliable hardware-level lock
         _exposureLocked = true;
-        try {
-          await _controller!.setExposureMode(ExposureMode.locked);
-          debugPrint('Exposure locked successfully');
-        } catch (e) {
-          debugPrint('Failed to lock exposure: $e');
-        }
-        try {
-          await _controller!.setFocusMode(FocusMode.locked);
-          debugPrint('Focus locked successfully');
-        } catch (e) {
-          debugPrint('Failed to lock focus: $e');
-        }
+        _nativeLockResult = await CameraControl.lockCameraSettings();
+        debugPrint('Native camera lock: '
+            'exp=${_nativeLockResult!.exposureLocked} '
+            'focus=${_nativeLockResult!.focusLocked} '
+            'wb=${_nativeLockResult!.whiteBalanceLocked} '
+            'err=${_nativeLockResult!.error}');
         _ppgService?.clearSignalBuffers();
         _status = 'Measuring...';
       }
@@ -266,18 +264,8 @@ class _MeasurementScreenState extends State<MeasurementScreen>
     }
 
     if (_exposureLocked) {
-      try {
-        await _controller!.setExposureMode(ExposureMode.auto);
-        debugPrint('Exposure unlocked');
-      } catch (e) {
-        debugPrint('Failed to unlock exposure: $e');
-      }
-      try {
-        await _controller!.setFocusMode(FocusMode.auto);
-        debugPrint('Focus unlocked');
-      } catch (e) {
-        debugPrint('Failed to unlock focus: $e');
-      }
+      await CameraControl.unlockCameraSettings();
+      debugPrint('Native camera unlock called');
       _exposureLocked = false;
     }
 
@@ -453,6 +441,14 @@ class _MeasurementScreenState extends State<MeasurementScreen>
                             style:
                                 const TextStyle(fontSize: 11, color: Colors.grey),
                           ),
+                          if (_nativeLockResult != null)
+                            Text(
+                              'ExpLock: ${_nativeLockResult!.exposureLocked ? "✓" : "✗"} | '
+                              'FocLock: ${_nativeLockResult!.focusLocked ? "✓" : "✗"} | '
+                              'WBLock: ${_nativeLockResult!.whiteBalanceLocked ? "✓" : "✗"}',
+                              style:
+                                  const TextStyle(fontSize: 11, color: Colors.grey),
+                            ),
                         ],
                       ),
                     ),
