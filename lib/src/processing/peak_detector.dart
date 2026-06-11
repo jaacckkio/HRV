@@ -2,7 +2,7 @@ import 'dart:math' as math;
 import 'package:flutter/foundation.dart';
 
 /// Candidate moving-average window sizes (seconds) for ROI auto-tuning.
-const List<double> kMovingAvgWindowsSec = [0.5, 0.65, 0.75, 1.0, 1.5];
+const List<double> kMovingAvgWindowsSec = [0.75, 1.0, 1.5, 2.0, 2.5];
 
 /// Detects peaks in a PPG signal for RR interval calculation.
 /// Adapted from flutter_ppg (MIT License, shigindo.com)
@@ -171,7 +171,7 @@ class PeakDetector {
       List<double> signal, double frameRate) {
     if (signal.length < 3) {
       return ROIDetectionResult(
-          interpolatedPeaks: [], peakIndices: [], selectedWindowSec: 0.75);
+          interpolatedPeaks: [], peakIndices: [], selectedWindowSec: kMovingAvgWindowsSec.last);
     }
 
     _ROICandidateResult? bestResult;
@@ -181,14 +181,15 @@ class PeakDetector {
       final candidate = _detectWithWindow(signal, frameRate, windowSec);
       if (candidate.rrIntervals.length < 2) continue;
 
-      // BPM gate: mean BPM must be 40–180
+      // Physiological gates: mean BPM 40–150, mean RR ≥ 400ms
       double rrSum = 0;
       for (final rr in candidate.rrIntervals) {
         rrSum += rr;
       }
       final meanRR = rrSum / candidate.rrIntervals.length;
+      if (meanRR < 400) continue; // reject noise-flood over-detection
       final meanBPM = 60000.0 / meanRR;
-      if (meanBPM < 40 || meanBPM > 180) continue;
+      if (meanBPM < 40 || meanBPM > 150) continue;
 
       // Compute SDSD (standard deviation of successive differences)
       final sdsd = _computeSDSD(candidate.rrIntervals);
@@ -200,8 +201,9 @@ class PeakDetector {
       }
     }
 
-    // Fallback to 0.75s window if all candidates were rejected
-    bestResult ??= _detectWithWindow(signal, frameRate, 0.75);
+    // Fallback to longest window if all candidates were rejected —
+    // over-detection (too-short window) is the failure we guard against
+    bestResult ??= _detectWithWindow(signal, frameRate, kMovingAvgWindowsSec.last);
 
     if (kDebugMode) {
       debugPrint(
