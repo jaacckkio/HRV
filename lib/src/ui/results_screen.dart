@@ -83,6 +83,8 @@ class ResultsScreen extends StatelessWidget {
               'Mean RR interval: ${hrvResult.meanRR.round()} ms',
               style: const TextStyle(fontSize: 13, color: _bodyTxt),
             ),
+            const SizedBox(height: 16),
+            _buildArtifactDebugPanel(),
             const SizedBox(height: 24),
             const Text(
               'This is not a medical device. Results are for wellness purposes '
@@ -132,6 +134,56 @@ class ResultsScreen extends StatelessWidget {
       MaterialPageRoute(builder: (_) => const MeasurementScreen()),
     );
   }
+
+  // TEMPORARY — remove once accuracy is validated
+  Widget _buildArtifactDebugPanel() {
+    final r = hrvResult;
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: const Color(0xFFFFF8E1),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: const Color(0xFFFFCC02), width: 1.5),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text(
+            'DEBUG \u2014 artifact removal (temporary)',
+            style: TextStyle(
+              fontSize: 12,
+              fontWeight: FontWeight.bold,
+              color: Color(0xFF6D4C00),
+            ),
+          ),
+          const SizedBox(height: 8),
+          _debugLine('Raw RR intervals', '${r.rawIntervalCount}'),
+          _debugLine('Removed by range (300\u20132000ms)', '${r.removedByRange}'),
+          _debugLine('Removed by beat-to-beat (20%)', '${r.removedByBeatToBeat}'),
+          _debugLine('Removed by percentile', '${r.removedByPercentile}'),
+          _debugLine('Clean intervals', '${r.cleanIntervalCount}'),
+          _debugLine('Artifact ratio', '${(r.artifactRatio * 100).toStringAsFixed(1)}%'),
+          _debugLine('Valid adjacent pairs (RMSSD)', '${r.validPairCount}'),
+          _debugLine('RMSSD', '${r.rmssd.toStringAsFixed(1)} ms'),
+        ],
+      ),
+    );
+  }
+
+  Widget _debugLine(String label, String value) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 1),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        children: [
+          Text(label, style: const TextStyle(fontSize: 11, color: Color(0xFF6D4C00))),
+          Text(value, style: const TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: Color(0xFF6D4C00))),
+        ],
+      ),
+    );
+  }
+  // END TEMPORARY
 
   Widget _buildQualityBanner() {
     final Color bgColor;
