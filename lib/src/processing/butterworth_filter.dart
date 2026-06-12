@@ -4,13 +4,12 @@ import 'dart:math' as math;
 /// Removes DC drift and respiratory-frequency content below the cardiac band.
 const double kBandpassLowHz = 0.7;
 
-/// Bandpass upper cutoff (Hz). 1.8 Hz ≈ 108 bpm.
-/// Suppresses the dicrotic notch and higher-frequency morphology, leaving
-/// approximately one hump per cardiac cycle. Appropriate for resting/wellness
-/// HRV where rates above ~108 bpm are out of scope. The fundamental of higher
-/// rates (e.g. 120 bpm = 2.0 Hz) will be attenuated — raise this value if
-/// exercise-range support is needed.
-const double kBandpassHighHz = 1.8;
+/// Bandpass upper cutoff (Hz). 2.5 Hz ≈ 150 bpm.
+/// Keeps adjacent beats crisply separated (the previous 1.8 Hz setting
+/// over-smoothed, merging close beats into a single hump and under-detecting).
+/// The dicrotic notch sits around 2.5–3 Hz, so 2.5 Hz rolls it off while
+/// preserving the cardiac fundamental across the full resting range.
+const double kBandpassHighHz = 2.5;
 
 class _BiquadCoeffs {
   final double b0, b1, b2, a1, a2;

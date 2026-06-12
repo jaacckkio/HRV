@@ -11,6 +11,13 @@ const List<double> kMovingAvgWindowsSec = [0.75, 1.0, 1.5, 2.0, 2.5];
 /// systolic peak) while allowing normal beat-to-beat variability.
 const double kRefractoryFraction = 0.70;
 
+/// Minimum fraction of the global autocorrelation maximum that a local
+/// maximum must reach to be accepted as the dominant beat period. Prevents
+/// tiny noise ripples from being selected while still favouring the first
+/// (fundamental) peak over the doubled-period harmonic. If no local max
+/// clears this threshold, the global maximum is used as fallback.
+const double kAutocorrPeakThreshold = 0.5;
+
 /// Detects peaks in a PPG signal for RR interval calculation.
 /// Adapted from flutter_ppg (MIT License, shigindo.com)
 class PeakDetector {
@@ -169,9 +176,12 @@ class PeakDetector {
   /// Estimate the dominant cardiac frequency via autocorrelation.
   ///
   /// Searches lags corresponding to the cardiac band
-  /// [kBandpassLowHz]–[kBandpassHighHz] and returns the frequency (Hz)
-  /// of the strongest autocorrelation peak within that band. All values
-  /// are derived from the input signal — no hard-coded rate.
+  /// [kBandpassLowHz]–[kBandpassHighHz]. To avoid half-rate locking (where
+  /// the global autocorrelation max lands on the doubled period), selects
+  /// the *first* local maximum (scanning from shortest lag upward) whose
+  /// correlation reaches at least [kAutocorrPeakThreshold] of the global
+  /// maximum. Falls back to the global max if no local peak clears the
+  /// threshold. All values are derived from the input signal.
   static double _estimateDominantFrequency(
       List<double> signal, double frameRate) {
     final n = signal.length;
@@ -189,8 +199,10 @@ class PeakDetector {
     }
     final mean = sum / n;
 
-    double bestCorr = double.negativeInfinity;
-    int bestLag = (minLag + maxLag) ~/ 2; // default to midpoint
+    // Compute autocorrelation for all in-band lags
+    final corrValues = List<double>.filled(maxLag - minLag + 1, 0.0);
+    double globalMaxCorr = double.negativeInfinity;
+    int globalMaxLag = (minLag + maxLag) ~/ 2;
 
     for (int lag = minLag; lag <= maxLag; lag++) {
       double corr = 0;
@@ -199,14 +211,30 @@ class PeakDetector {
         corr += (signal[i] - mean) * (signal[i + lag] - mean);
       }
       corr /= limit;
+      corrValues[lag - minLag] = corr;
 
-      if (corr > bestCorr) {
-        bestCorr = corr;
-        bestLag = lag;
+      if (corr > globalMaxCorr) {
+        globalMaxCorr = corr;
+        globalMaxLag = lag;
       }
     }
 
-    return frameRate / bestLag;
+    // Find the first local maximum (scanning from shortest lag) that
+    // exceeds kAutocorrPeakThreshold of the global max — this favours the
+    // fundamental beat period over the doubled-period harmonic.
+    final threshold = kAutocorrPeakThreshold * globalMaxCorr;
+    final len = corrValues.length;
+
+    for (int j = 1; j < len - 1; j++) {
+      if (corrValues[j] > corrValues[j - 1] &&
+          corrValues[j] > corrValues[j + 1] &&
+          corrValues[j] >= threshold) {
+        return frameRate / (minLag + j);
+      }
+    }
+
+    // Fallback: no local max cleared the threshold — use global max
+    return frameRate / globalMaxLag;
   }
 
   /// Detect peaks using the moving-average ROI method with SDSD-minimising
