@@ -1,8 +1,15 @@
 import 'dart:math' as math;
 import 'package:flutter/foundation.dart';
+import 'butterworth_filter.dart' show kBandpassLowHz, kBandpassHighHz;
 
 /// Candidate moving-average window sizes (seconds) for ROI auto-tuning.
 const List<double> kMovingAvgWindowsSec = [0.75, 1.0, 1.5, 2.0, 2.5];
+
+/// Fraction of the dominant beat period used as the refractory (minimum
+/// inter-peak distance). At 0.70, a 1000 ms beat period yields a 700 ms
+/// refractory — enough to suppress the dicrotic notch (~300 ms after the
+/// systolic peak) while allowing normal beat-to-beat variability.
+const double kRefractoryFraction = 0.70;
 
 /// Detects peaks in a PPG signal for RR interval calculation.
 /// Adapted from flutter_ppg (MIT License, shigindo.com)
@@ -159,14 +166,59 @@ class PeakDetector {
   // HeartPy-style moving-average ROI peak detection with auto-tuning
   // ──────────────────────────────────────────────────────────────────
 
+  /// Estimate the dominant cardiac frequency via autocorrelation.
+  ///
+  /// Searches lags corresponding to the cardiac band
+  /// [kBandpassLowHz]–[kBandpassHighHz] and returns the frequency (Hz)
+  /// of the strongest autocorrelation peak within that band. All values
+  /// are derived from the input signal — no hard-coded rate.
+  static double _estimateDominantFrequency(
+      List<double> signal, double frameRate) {
+    final n = signal.length;
+    if (n < 3) return (kBandpassLowHz + kBandpassHighHz) / 2;
+
+    // Lag range from cardiac band boundaries (period = 1/freq)
+    final minLag = math.max(1, (frameRate / kBandpassHighHz).floor());
+    final maxLag = math.min(n ~/ 2, (frameRate / kBandpassLowHz).ceil());
+    if (minLag >= maxLag) return (kBandpassLowHz + kBandpassHighHz) / 2;
+
+    // Subtract mean for zero-centred autocorrelation
+    double sum = 0;
+    for (int i = 0; i < n; i++) {
+      sum += signal[i];
+    }
+    final mean = sum / n;
+
+    double bestCorr = double.negativeInfinity;
+    int bestLag = (minLag + maxLag) ~/ 2; // default to midpoint
+
+    for (int lag = minLag; lag <= maxLag; lag++) {
+      double corr = 0;
+      final limit = n - lag;
+      for (int i = 0; i < limit; i++) {
+        corr += (signal[i] - mean) * (signal[i + lag] - mean);
+      }
+      corr /= limit;
+
+      if (corr > bestCorr) {
+        bestCorr = corr;
+        bestLag = lag;
+      }
+    }
+
+    return frameRate / bestLag;
+  }
+
   /// Detect peaks using the moving-average ROI method with SDSD-minimising
-  /// window auto-tuning. Returns interpolated (fractional) peak indices.
+  /// window auto-tuning and a signal-derived refractory period.
   ///
   /// [signal] is the filtered PPG waveform. [frameRate] is the sampling rate
-  /// in Hz. The method tries each candidate window, picks the one producing
-  /// the lowest non-zero SDSD within physiological BPM range, and returns
-  /// the peaks from that window. Also returns the chosen window via
-  /// [ROIDetectionResult].
+  /// in Hz. The method estimates the dominant cardiac frequency via
+  /// autocorrelation, derives a refractory period ([kRefractoryFraction] of
+  /// the beat period), then tries each candidate window with that refractory
+  /// enforced. Picks the window producing the lowest non-zero SDSD within
+  /// physiological BPM range and returns the peaks. Also returns the chosen
+  /// window via [ROIDetectionResult].
   static ROIDetectionResult findPeaksROI(
       List<double> signal, double frameRate) {
     if (signal.length < 3) {
@@ -174,11 +226,27 @@ class PeakDetector {
           interpolatedPeaks: [], peakIndices: [], selectedWindowSec: kMovingAvgWindowsSec.last);
     }
 
+    // Estimate dominant cardiac frequency and derive refractory period
+    final dominantHz = _estimateDominantFrequency(signal, frameRate);
+    final periodMs = 1000.0 / dominantHz;
+    final refractoryMs = kRefractoryFraction * periodMs;
+    final refractoryFrames = (refractoryMs / 1000.0 * frameRate).round();
+
+    if (kDebugMode) {
+      debugPrint(
+        'PeakDetector: dominantHz=${dominantHz.toStringAsFixed(2)} '
+        'periodMs=${periodMs.toStringAsFixed(0)} '
+        'refractoryMs=${refractoryMs.toStringAsFixed(0)} '
+        'refractoryFrames=$refractoryFrames',
+      );
+    }
+
     _ROICandidateResult? bestResult;
     double bestSdsd = double.infinity;
 
     for (final windowSec in kMovingAvgWindowsSec) {
-      final candidate = _detectWithWindow(signal, frameRate, windowSec);
+      final candidate =
+          _detectWithWindow(signal, frameRate, windowSec, refractoryFrames);
       if (candidate.rrIntervals.length < 2) continue;
 
       // Physiological gates: mean BPM 40–150, mean RR ≥ 400ms
@@ -203,7 +271,8 @@ class PeakDetector {
 
     // Fallback to longest window if all candidates were rejected —
     // over-detection (too-short window) is the failure we guard against
-    bestResult ??= _detectWithWindow(signal, frameRate, kMovingAvgWindowsSec.last);
+    bestResult ??=
+        _detectWithWindow(signal, frameRate, kMovingAvgWindowsSec.last, refractoryFrames);
 
     if (kDebugMode) {
       debugPrint(
@@ -222,8 +291,15 @@ class PeakDetector {
   }
 
   /// Run the ROI detection pipeline for a single candidate window.
+  ///
+  /// [refractoryFrames] is the minimum distance (in frames) between any two
+  /// accepted peaks, derived from the signal's dominant cardiac frequency.
+  /// When two ROI maxima fall within the refractory window, only the taller
+  /// one survives — this prevents the dicrotic bump from being accepted as
+  /// a separate beat.
   static _ROICandidateResult _detectWithWindow(
-      List<double> signal, double frameRate, double windowSec) {
+      List<double> signal, double frameRate, double windowSec,
+      int refractoryFrames) {
     final n = signal.length;
     final windowSamples = (windowSec * frameRate).round();
     final halfWindow = windowSamples ~/ 2;
@@ -247,7 +323,7 @@ class PeakDetector {
 
     // Step 3: Find ROIs — contiguous spans above the moving average
     // Step 4: Within each ROI, find the sample with max amplitude
-    final roiMaxima = <int>[];
+    final rawRoiMaxima = <int>[];
     bool inROI = false;
     int roiMaxIdx = 0;
     double roiMaxVal = double.negativeInfinity;
@@ -268,13 +344,29 @@ class PeakDetector {
         }
       } else if (!aboveAvg && inROI) {
         // Crossing down — end ROI, record the maximum
-        roiMaxima.add(roiMaxIdx);
+        rawRoiMaxima.add(roiMaxIdx);
         inROI = false;
       }
     }
     // If signal ends while in an ROI, close it
     if (inROI) {
-      roiMaxima.add(roiMaxIdx);
+      rawRoiMaxima.add(roiMaxIdx);
+    }
+
+    // Step 4b: Enforce refractory period — when two ROI maxima are closer
+    // than refractoryFrames, keep the taller one and discard the other.
+    final roiMaxima = <int>[];
+    for (final idx in rawRoiMaxima) {
+      if (roiMaxima.isNotEmpty && idx - roiMaxima.last < refractoryFrames) {
+        // Within refractory of the previous accepted peak — keep the taller
+        if (signal[idx] > signal[roiMaxima.last]) {
+          roiMaxima.removeLast();
+          roiMaxima.add(idx);
+        }
+        // else: previous peak is taller, discard this one
+      } else {
+        roiMaxima.add(idx);
+      }
     }
 
     // Step 5: Apply parabolic interpolation to each ROI maximum

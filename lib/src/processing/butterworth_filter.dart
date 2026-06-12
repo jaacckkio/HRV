@@ -1,5 +1,17 @@
 import 'dart:math' as math;
 
+/// Bandpass lower cutoff (Hz). 0.7 Hz ≈ 42 bpm.
+/// Removes DC drift and respiratory-frequency content below the cardiac band.
+const double kBandpassLowHz = 0.7;
+
+/// Bandpass upper cutoff (Hz). 1.8 Hz ≈ 108 bpm.
+/// Suppresses the dicrotic notch and higher-frequency morphology, leaving
+/// approximately one hump per cardiac cycle. Appropriate for resting/wellness
+/// HRV where rates above ~108 bpm are out of scope. The fundamental of higher
+/// rates (e.g. 120 bpm = 2.0 Hz) will be attenuated — raise this value if
+/// exercise-range support is needed.
+const double kBandpassHighHz = 1.8;
+
 class _BiquadCoeffs {
   final double b0, b1, b2, a1, a2;
   const _BiquadCoeffs(this.b0, this.b1, this.b2, this.a1, this.a2);
@@ -15,9 +27,11 @@ class _BiquadState {
   }
 }
 
-/// Butterworth bandpass filter (0.5–8 Hz) implemented as two cascaded
-/// biquad sections: a 2nd-order high-pass followed by a 2nd-order low-pass.
-/// Wide passband removes DC drift and HF noise; peak detector isolates cardiac band.
+/// Butterworth bandpass filter implemented as two cascaded biquad sections:
+/// a 2nd-order high-pass at [kBandpassLowHz] followed by a 2nd-order low-pass
+/// at [kBandpassHighHz]. The narrow passband collapses each cardiac cycle to
+/// a single hump, suppressing the dicrotic notch that otherwise causes
+/// double-detection.
 class ButterworthBandpassFilter {
   late final _BiquadCoeffs _hpCoeffs;
   late final _BiquadCoeffs _lpCoeffs;
@@ -25,8 +39,8 @@ class ButterworthBandpassFilter {
   final _BiquadState _lpState = _BiquadState();
 
   ButterworthBandpassFilter({required double sampleRate}) {
-    _hpCoeffs = _computeHighPass(sampleRate, 0.5);
-    _lpCoeffs = _computeLowPass(sampleRate, 8.0);
+    _hpCoeffs = _computeHighPass(sampleRate, kBandpassLowHz);
+    _lpCoeffs = _computeLowPass(sampleRate, kBandpassHighHz);
   }
 
   static _BiquadCoeffs _computeHighPass(double sampleRate, double cutoff) {
