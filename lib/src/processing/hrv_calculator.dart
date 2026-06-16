@@ -15,6 +15,7 @@ class HrvResult {
   final double artifactRatio;
   final int rawIntervalCount;
   final int removedByRange;
+  final int insertedByInterpolation;
   final int removedByBeatToBeat;
   final int removedByPercentile;
   final int cleanIntervalCount;
@@ -34,6 +35,7 @@ class HrvResult {
     this.artifactRatio = 0.0,
     this.rawIntervalCount = 0,
     this.removedByRange = 0,
+    this.insertedByInterpolation = 0,
     this.removedByBeatToBeat = 0,
     this.removedByPercentile = 0,
     this.cleanIntervalCount = 0,
@@ -156,6 +158,7 @@ class HrvCalculator {
       artifactRatio: artifactRatio,
       rawIntervalCount: filtered.rawCount,
       removedByRange: filtered.removedStep1,
+      insertedByInterpolation: filtered.insertedByInterpolation,
       removedByBeatToBeat: filtered.removedStep2,
       removedByPercentile: filtered.removedStep3,
       cleanIntervalCount: n,

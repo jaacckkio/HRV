@@ -11,10 +11,18 @@ class RRArtifactFilter {
   static const double kMinRR = 300.0;
   static const double kMaxRR = 2000.0;
 
+  /// Missed-beat interpolation: an interval at least this multiple of its
+  /// local-median neighbours is treated as a missed beat and split.
+  static const double kMissedBeatSplitThreshold = 1.5;
+
+  /// Never split one interval into more than this many sub-beats.
+  static const int kMaxBeatSplit = 3;
+
   /// Beat-to-beat difference threshold (fraction of previous interval).
-  /// TODO: make adaptive to the person's baseline HRV — a fixed 20% can
-  /// overcorrect high-HRV individuals. Fine for resting tests now.
-  static const double kBeatToBeatThreshold = 0.20;
+  /// Mildly loosened from 0.20 to 0.25 for high-HRV subjects now that
+  /// missed-beat interpolation (Step 1b) repairs the doubled intervals
+  /// the old 0.20 threshold was over-aggressively deleting.
+  static const double kBeatToBeatThreshold = 0.25;
 
   /// Percentile outlier margin (fraction of P25/P75).
   static const double kPercentileMargin = 0.25;
@@ -64,6 +72,39 @@ class RRArtifactFilter {
       values = keptValues;
       adjacent = keptAdjacent;
       if (adjacent.isNotEmpty) adjacent[0] = true;
+    }
+
+    // --- Step 1b: Missed-beat interpolation ---
+    // A missed detection leaves a roughly-doubled interval. Split it back
+    // into the real beats it represents so the artifact never reaches the
+    // beat-to-beat deletion stage.
+    int insertedByInterpolation = 0;
+    {
+      final expandedValues = <double>[];
+      final expandedAdjacent = <bool>[];
+      for (int i = 0; i < values.length; i++) {
+        final med = _localMedian(values, i);
+        if (med > 0) {
+          final ratio = values[i] / med;
+          final n = ratio.round();
+          if (ratio >= kMissedBeatSplitThreshold && n >= 2) {
+            final splits = n < kMaxBeatSplit ? n : kMaxBeatSplit;
+            final sub = values[i] / splits;
+            for (int j = 0; j < splits; j++) {
+              expandedValues.add(sub);
+              // First sub-interval keeps incoming adjacency; remaining are
+              // recovered consecutive beats — mark adjacent-clean.
+              expandedAdjacent.add(j == 0 ? adjacent[i] : true);
+            }
+            insertedByInterpolation += splits - 1;
+            continue;
+          }
+        }
+        expandedValues.add(values[i]);
+        expandedAdjacent.add(adjacent[i]);
+      }
+      values = expandedValues;
+      adjacent = expandedAdjacent;
     }
 
     // --- Step 2: Beat-to-beat difference filter ---
@@ -123,6 +164,7 @@ class RRArtifactFilter {
       removedStep1: removedStep1,
       removedStep2: removedStep2,
       removedStep3: removedStep3,
+      insertedByInterpolation: insertedByInterpolation,
       rawCount: rawCount,
     );
 
@@ -130,13 +172,34 @@ class RRArtifactFilter {
       final totalRemoved = removedStep1 + removedStep2 + removedStep3;
       debugPrint(
         'RRArtifactFilter: raw=$rawCount '
-        'step1=-$removedStep1 step2=-$removedStep2 step3=-$removedStep3 '
+        'step1=-$removedStep1 interp=+$insertedByInterpolation '
+        'step2=-$removedStep2 step3=-$removedStep3 '
         'clean=${values.length} '
         'artifactRatio=${result.artifactRatio.toStringAsFixed(2)}',
       );
     }
 
     return result;
+  }
+
+  /// Median of up to 6 neighbours around index [i] (3 before, 3 after),
+  /// excluding the value at [i] itself. Falls back to the whole-list median
+  /// when no neighbours exist.
+  static double _localMedian(List<double> values, int i) {
+    final neighbours = <double>[];
+    final lo = i - 3 < 0 ? 0 : i - 3;
+    final hi = i + 3 >= values.length ? values.length - 1 : i + 3;
+    for (int j = lo; j <= hi; j++) {
+      if (j != i) neighbours.add(values[j]);
+    }
+    if (neighbours.isEmpty) {
+      // Fall back to whole-list median.
+      if (values.isEmpty) return 0.0;
+      final sorted = List<double>.from(values)..sort();
+      return sorted[sorted.length ~/ 2];
+    }
+    neighbours.sort();
+    return neighbours[neighbours.length ~/ 2];
   }
 
   static double _percentile(List<double> sortedData, int percentile) {
@@ -167,6 +230,9 @@ class ArtifactFilterResult {
   final int removedStep2;
   final int removedStep3;
 
+  /// Number of sub-intervals inserted by missed-beat interpolation (Step 1b).
+  final int insertedByInterpolation;
+
   /// Number of raw intervals before filtering.
   final int rawCount;
 
@@ -176,6 +242,7 @@ class ArtifactFilterResult {
     required this.removedStep1,
     required this.removedStep2,
     required this.removedStep3,
+    this.insertedByInterpolation = 0,
     required this.rawCount,
   });
 
