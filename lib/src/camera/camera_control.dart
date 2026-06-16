@@ -42,6 +42,27 @@ class CameraControl {
     }
   }
 
+  /// Request the highest safe supported frame rate on the rear camera.
+  /// Returns the FPS that was set on the device, or 0 on failure.
+  /// Logs any error but never throws.
+  static Future<double> setHighFrameRate() async {
+    try {
+      final result = await _channel.invokeMapMethod<String, dynamic>(
+          'setHighFrameRate');
+      if (result == null) return 0;
+      final error = result['error'];
+      if (error != null && error is String) {
+        // ignore: avoid_print
+        print('setHighFrameRate error: $error');
+      }
+      return (result['requestedFps'] as num?)?.toDouble() ?? 0;
+    } catch (e) {
+      // ignore: avoid_print
+      print('setHighFrameRate exception: $e');
+      return 0;
+    }
+  }
+
   /// Unlock camera settings back to continuous auto modes.
   static Future<void> unlockCameraSettings() async {
     try {

@@ -57,6 +57,9 @@ class _MeasurementScreenState extends State<MeasurementScreen>
   List<int> _livePeakIndicesInFull = [];
   Timer? _liveMetricsTimer;
 
+  // FPS diagnostic — requested vs delivered
+  double _requestedFps = 0;
+
   // DEV TOOLING — recording state
   bool _isRecording = false;
   bool _isReplaying = false;
@@ -127,6 +130,7 @@ class _MeasurementScreenState extends State<MeasurementScreen>
       _liveBPM = null;
       _liveRMSSD = null;
       _livePeakIndicesInFull = [];
+      _requestedFps = 0;
       _currentSignal = null;
       _status = 'Starting...';
       _fingerFirstDetected = false;
@@ -148,6 +152,12 @@ class _MeasurementScreenState extends State<MeasurementScreen>
     _countdownController!.forward();
 
     WakelockPlus.enable();
+
+    // Request highest supported frame rate via native plugin (diagnostic).
+    // Must be called after controller.initialize() sets up the AVCaptureSession
+    // but before startImageStream so the format is active when frames arrive.
+    _requestedFps = await CameraControl.setHighFrameRate();
+    debugPrint('Requested FPS: $_requestedFps');
 
     try {
       await _controller!.setFlashMode(FlashMode.torch);
@@ -380,6 +390,7 @@ class _MeasurementScreenState extends State<MeasurementScreen>
       startWallClockUtc:
           _recordStartWallClock ?? DateTime.now().toUtc().toIso8601String(),
       fps: fps,
+      requestedFps: _requestedFps,
       clearBufferAtFrame: _recordClearAtFrame,
       samples: List.from(_recordedSamples),
       finalRRIntervals: beats,
@@ -629,6 +640,18 @@ class _MeasurementScreenState extends State<MeasurementScreen>
                             _status,
                             style: TextStyle(color: _qualityColor(), fontSize: 13),
                           ),
+                          if (_isScanning) ...[
+                            const SizedBox(height: 6),
+                            Text(
+                              'Stream FPS: ${(_currentSignal?.frameRate ?? 0).toStringAsFixed(0)}'
+                              ' (requested ${_requestedFps.toStringAsFixed(0)})',
+                              style: const TextStyle(
+                                fontSize: 13,
+                                fontWeight: FontWeight.bold,
+                                color: Colors.cyanAccent,
+                              ),
+                            ),
+                          ],
                         ],
                       ),
                     ),

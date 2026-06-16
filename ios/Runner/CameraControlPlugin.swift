@@ -38,6 +38,8 @@ class CameraControlPlugin {
             result(lockCameraSettings())
         case "unlockCameraSettings":
             result(unlockCameraSettings())
+        case "setHighFrameRate":
+            result(setHighFrameRate())
         default:
             result(FlutterMethodNotImplemented)
         }
@@ -130,5 +132,90 @@ class CameraControlPlugin {
         device.unlockForConfiguration()
 
         return ["success": true]
+    }
+
+    /// Request the highest safe supported frame rate on the rear camera.
+    ///
+    /// Iterates device.formats, finds the format whose
+    /// videoSupportedFrameRateRanges has the highest maxFrameRate
+    /// (preferring 120, else 60, else best available), sets
+    /// device.activeFormat FIRST, THEN activeVideoMin/MaxFrameDuration.
+    ///
+    /// SAFETY (Apple docs): activeFormat must be set BEFORE frame duration,
+    /// and the chosen format must actually support the target rate —
+    /// otherwise the app crashes. Every step is guarded; on failure the
+    /// camera stays at its current (default) settings.
+    private func setHighFrameRate() -> [String: Any] {
+        guard let device = AVCaptureDevice.default(
+            .builtInWideAngleCamera, for: .video, position: .back
+        ) else {
+            return ["requestedFps": 0.0, "error": "Could not acquire rear camera device"]
+        }
+
+        // Scan all formats for the highest supported frame rate
+        var bestFormat: AVCaptureDevice.Format? = nil
+        var bestMaxFps: Float64 = 0
+
+        for format in device.formats {
+            let mediaType = CMFormatDescriptionGetMediaType(format.formatDescription)
+            guard mediaType == kCMMediaType_Video else { continue }
+
+            for range in format.videoSupportedFrameRateRanges {
+                if range.maxFrameRate > bestMaxFps {
+                    bestMaxFps = range.maxFrameRate
+                    bestFormat = format
+                }
+            }
+        }
+
+        // Target: prefer 120, then 60, else best available
+        let targetFps: Float64
+        if bestMaxFps >= 120 {
+            targetFps = 120
+        } else if bestMaxFps >= 60 {
+            targetFps = 60
+        } else if bestMaxFps > 0 {
+            targetFps = bestMaxFps
+        } else {
+            return ["requestedFps": 0.0, "error": "No supported frame rates found"]
+        }
+
+        guard let chosenFormat = bestFormat else {
+            return ["requestedFps": 0.0, "error": "No suitable format found"]
+        }
+
+        // Verify the chosen format actually supports the target rate
+        var supportsTarget = false
+        for range in chosenFormat.videoSupportedFrameRateRanges {
+            if range.minFrameRate <= targetFps && range.maxFrameRate >= targetFps {
+                supportsTarget = true
+                break
+            }
+        }
+        if !supportsTarget {
+            return [
+                "requestedFps": 0.0,
+                "error": "Best format does not support \(targetFps) fps"
+            ]
+        }
+
+        do {
+            try device.lockForConfiguration()
+            // CRITICAL: set activeFormat BEFORE frame duration (Apple docs).
+            device.activeFormat = chosenFormat
+            device.activeVideoMinFrameDuration = CMTimeMake(value: 1, timescale: Int32(targetFps))
+            device.activeVideoMaxFrameDuration = CMTimeMake(value: 1, timescale: Int32(targetFps))
+            device.unlockForConfiguration()
+
+            let dims = CMVideoFormatDescriptionGetDimensions(chosenFormat.formatDescription)
+            NSLog("CameraControlPlugin: set format \(dims.width)x\(dims.height) @ \(targetFps) fps")
+
+            return ["requestedFps": targetFps, "error": NSNull()]
+        } catch {
+            return [
+                "requestedFps": 0.0,
+                "error": "lockForConfiguration failed: \(error.localizedDescription)"
+            ]
+        }
     }
 }

@@ -55,6 +55,7 @@ const String _fileName = 'ppg_recording_latest.json';
 class PPGRecording {
   final String startWallClockUtc;
   final double fps;
+  final double requestedFps; // FPS set on the device via native plugin (0 = default)
   final int clearBufferAtFrame; // frame index where clearSignalBuffers was called
   final List<PPGFrameSample> samples;
   final List<RRBeat> finalRRIntervals;
@@ -62,6 +63,7 @@ class PPGRecording {
   const PPGRecording({
     required this.startWallClockUtc,
     required this.fps,
+    this.requestedFps = 0,
     required this.clearBufferAtFrame,
     required this.samples,
     required this.finalRRIntervals,
@@ -70,6 +72,7 @@ class PPGRecording {
   Map<String, dynamic> toJson() => {
         'startWallClockUtc': startWallClockUtc,
         'fps': fps,
+        'requestedFps': requestedFps,
         'clearBufferAtFrame': clearBufferAtFrame,
         'sampleCount': samples.length,
         'samples': samples.map((s) => s.toJson()).toList(),
@@ -79,6 +82,7 @@ class PPGRecording {
   factory PPGRecording.fromJson(Map<String, dynamic> json) => PPGRecording(
         startWallClockUtc: json['startWallClockUtc'] as String,
         fps: (json['fps'] as num).toDouble(),
+        requestedFps: (json['requestedFps'] as num?)?.toDouble() ?? 0,
         clearBufferAtFrame: (json['clearBufferAtFrame'] as num?)?.toInt() ?? -1,
         samples: (json['samples'] as List)
             .map((e) => PPGFrameSample.fromJson(e as Map<String, dynamic>))
