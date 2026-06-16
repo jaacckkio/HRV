@@ -906,16 +906,6 @@ class _MeasurementScreenState extends State<MeasurementScreen>
   }
 
   Widget _buildPulseWaveformCard() {
-    // Map peak indices from full-signal coordinates to the display buffer
-    final fullLen = _ppgService?.fullFilteredSignalLength ?? 0;
-    final histLen = _filteredHistory.length;
-    final offset = fullLen - histLen;
-    final displayPeaks = <int>[];
-    for (final p in _livePeakIndicesInFull) {
-      final idx = p - offset;
-      if (idx >= 0 && idx < histLen) displayPeaks.add(idx);
-    }
-
     return Container(
       padding: const EdgeInsets.all(16),
       decoration: _cardDecoration(),
@@ -934,7 +924,7 @@ class _MeasurementScreenState extends State<MeasurementScreen>
                 ? Center(child: Container(height: 1, color: _border))
                 : CustomPaint(
                     painter:
-                        WaveformPainter(_filteredHistory, _teal, displayPeaks),
+                        WaveformPainter(_filteredHistory, _teal, const []),
                     child: Container(),
                   ),
           ),
