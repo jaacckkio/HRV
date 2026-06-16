@@ -92,25 +92,27 @@ class ResultsScreen extends StatelessWidget {
               'Mean RR interval: ${hrvResult.meanRR.round()} ms',
               style: const TextStyle(fontSize: 13, color: _bodyTxt),
             ),
-            const SizedBox(height: 16),
-            _buildArtifactDebugPanel(),
-            // DEV TOOLING — full-signal chart with peak markers
-            if (fullFilteredSignal != null &&
-                fullFilteredSignal!.isNotEmpty &&
-                signalFps != null) ...[
+            if (kShowDevTools) ...[
               const SizedBox(height: 16),
-              Container(
-                padding: const EdgeInsets.all(12),
-                decoration: BoxDecoration(
-                  color: const Color(0xFF1C1F2A),
-                  borderRadius: BorderRadius.circular(10),
+              _buildArtifactDebugPanel(),
+              // DEV TOOLING — full-signal chart with peak markers
+              if (fullFilteredSignal != null &&
+                  fullFilteredSignal!.isNotEmpty &&
+                  signalFps != null) ...[
+                const SizedBox(height: 16),
+                Container(
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF1C1F2A),
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                  child: FullSignalChart(
+                    signal: fullFilteredSignal!,
+                    peakIndices: fullPeakIndices ?? [],
+                    fps: signalFps!,
+                  ),
                 ),
-                child: FullSignalChart(
-                  signal: fullFilteredSignal!,
-                  peakIndices: fullPeakIndices ?? [],
-                  fps: signalFps!,
-                ),
-              ),
+              ],
             ],
             const SizedBox(height: 24),
             const Text(
