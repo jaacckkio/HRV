@@ -57,6 +57,17 @@ class _MeasurementScreenState extends State<MeasurementScreen>
   List<int> _livePeakIndicesInFull = [];
   Timer? _liveMetricsTimer;
 
+  // Stability-based reveal gating — metrics show "Measuring…" until settled
+  static const int _bpmMinSeconds = 10;
+  static const int _rmssdMinSeconds = 25;
+  static const double _bpmSettleTolerance = 3.0; // ±3 bpm
+  static const double _rmssdSettleTolerance = 10.0; // ±10 ms
+  static const int _settleHistoryLen = 4; // last N 1 Hz readings
+  bool _bpmSettled = false;
+  bool _rmssdSettled = false;
+  final List<double> _bpmHistory = [];
+  final List<double> _rmssdHistory = [];
+
   // FPS diagnostic — requested vs delivered
   double _requestedFps = 0;
 
@@ -130,6 +141,10 @@ class _MeasurementScreenState extends State<MeasurementScreen>
       _liveBPM = null;
       _liveRMSSD = null;
       _livePeakIndicesInFull = [];
+      _bpmSettled = false;
+      _rmssdSettled = false;
+      _bpmHistory.clear();
+      _rmssdHistory.clear();
       _requestedFps = 0;
       _currentSignal = null;
       _status = 'Starting...';
@@ -507,6 +522,10 @@ class _MeasurementScreenState extends State<MeasurementScreen>
   void _updateLiveMetrics() {
     if (_ppgService == null || !_exposureLocked) return;
 
+    final measElapsed = _measuringStartTime != null
+        ? DateTime.now().difference(_measuringStartTime!).inSeconds
+        : 0;
+
     // BPM — from trailing-window ROI detection (15 s window)
     final windowResult = _ppgService!.computeRollingWindowDetection(
         windowSeconds: _rollingWindowSeconds);
@@ -518,6 +537,21 @@ class _MeasurementScreenState extends State<MeasurementScreen>
         sum += rr;
       }
       _liveBPM = 60000.0 / (sum / windowResult.rrIntervals.length);
+
+      // BPM settle check
+      if (!_bpmSettled && _liveBPM != null) {
+        _bpmHistory.add(_liveBPM!);
+        if (_bpmHistory.length > _settleHistoryLen) {
+          _bpmHistory.removeAt(0);
+        }
+        if (measElapsed >= _bpmMinSeconds &&
+            _bpmHistory.length >= _settleHistoryLen) {
+          final spread = _bpmHistory.reduce(max) - _bpmHistory.reduce(min);
+          if (spread <= _bpmSettleTolerance * 2) {
+            _bpmSettled = true;
+          }
+        }
+      }
     }
 
     // RMSSD — from full accumulated signal, through the same artifact filter
@@ -529,6 +563,22 @@ class _MeasurementScreenState extends State<MeasurementScreen>
       final hrvResult = HrvCalculator.compute(allRR);
       if (hrvResult.rmssd > 0) {
         _liveRMSSD = hrvResult.rmssd;
+
+        // RMSSD settle check
+        if (!_rmssdSettled) {
+          _rmssdHistory.add(_liveRMSSD!);
+          if (_rmssdHistory.length > _settleHistoryLen) {
+            _rmssdHistory.removeAt(0);
+          }
+          if (measElapsed >= _rmssdMinSeconds &&
+              _rmssdHistory.length >= _settleHistoryLen) {
+            final spread =
+                _rmssdHistory.reduce(max) - _rmssdHistory.reduce(min);
+            if (spread <= _rmssdSettleTolerance * 2) {
+              _rmssdSettled = true;
+            }
+          }
+        }
       }
     }
   }
@@ -557,7 +607,11 @@ class _MeasurementScreenState extends State<MeasurementScreen>
   @override
   Widget build(BuildContext context) {
     String hrDisplay = '--';
-    if (_liveBPM != null) hrDisplay = '${_liveBPM!.round()}';
+    if (_isScanning && _exposureLocked && !_bpmSettled) {
+      hrDisplay = 'Measuring\u2026';
+    } else if (_bpmSettled && _liveBPM != null) {
+      hrDisplay = '${_liveBPM!.round()}';
+    }
 
     return Scaffold(
       appBar: AppBar(
@@ -612,9 +666,9 @@ class _MeasurementScreenState extends State<MeasurementScreen>
                             mainAxisAlignment: MainAxisAlignment.spaceBetween,
                             children: [
                               Text(
-                                '$hrDisplay BPM',
+                                _bpmSettled ? '$hrDisplay BPM' : hrDisplay,
                                 style: TextStyle(
-                                  fontSize: 32,
+                                  fontSize: _bpmSettled ? 32 : 20,
                                   fontWeight: FontWeight.bold,
                                   color: _qualityColor(),
                                 ),
@@ -627,10 +681,10 @@ class _MeasurementScreenState extends State<MeasurementScreen>
                           ),
                           const SizedBox(height: 4),
                           Text(
-                            _liveRMSSD != null
+                            _rmssdSettled && _liveRMSSD != null
                                 ? 'HRV (RMSSD): ${_liveRMSSD!.toStringAsFixed(1)} ms'
                                 : (_isScanning && _exposureLocked
-                                    ? 'HRV (RMSSD): building\u2026'
+                                    ? 'HRV (RMSSD): Measuring\u2026'
                                     : 'HRV (RMSSD): \u2014'),
                             style: const TextStyle(
                                 fontSize: 14, color: Colors.white70),

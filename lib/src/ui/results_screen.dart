@@ -223,6 +223,10 @@ class ResultsScreen extends StatelessWidget {
       bgColor = _error.withOpacity(0.12);
       textColor = _error;
       text = hrvResult.qualityNote;
+    } else if (hrvResult.qualityNote.contains('moderate')) {
+      bgColor = _warning.withOpacity(0.15);
+      textColor = _warning;
+      text = hrvResult.qualityNote;
     } else if (hrvResult.qualityNote.contains('Short')) {
       bgColor = _warning.withOpacity(0.15);
       textColor = _warning;

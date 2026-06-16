@@ -47,6 +47,13 @@ class HrvResult {
 class HrvCalculator {
   const HrvCalculator._();
 
+  /// Artifact-ratio tier cutoffs for the results banner.
+  /// < moderate  → clean (no warning)
+  /// moderate–unreliable → "results approximate"
+  /// > unreliable → "results unreliable"
+  static const double kArtifactRatioModerate = 0.45;
+  static const double kArtifactRatioUnreliable = 0.60;
+
   static HrvResult compute(List<double> rrIntervals,
       {double selectedMovingAvgWindow = 0.0}) {
     if (rrIntervals.length < 2) {
@@ -124,13 +131,16 @@ class HrvCalculator {
     final lnRmssd = rmssd > 0 ? math.log(rmssd) : 0.0;
 
     // Validity
-    final bool isValid = n >= 10 && artifactRatio <= 0.30;
+    final bool isValid = n >= 10 && artifactRatio <= kArtifactRatioUnreliable;
     final String qualityNote;
     if (n < 10) {
       qualityNote = 'Not enough heartbeats detected (need at least 10)';
-    } else if (artifactRatio > 0.30) {
+    } else if (artifactRatio > kArtifactRatioUnreliable) {
       qualityNote =
           'High artifact ratio (${(artifactRatio * 100).round()}%) — results unreliable';
+    } else if (artifactRatio >= kArtifactRatioModerate) {
+      qualityNote =
+          'Measurement quality moderate (${(artifactRatio * 100).round()}%) — results approximate';
     } else if (n <= 20) {
       qualityNote = 'Short measurement — results may be less reliable';
     } else {
