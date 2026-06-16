@@ -4,12 +4,12 @@ import 'dart:math' as math;
 /// Removes DC drift and respiratory-frequency content below the cardiac band.
 const double kBandpassLowHz = 0.7;
 
-/// Bandpass upper cutoff (Hz). 2.5 Hz ≈ 150 bpm.
-/// Keeps adjacent beats crisply separated (the previous 1.8 Hz setting
-/// over-smoothed, merging close beats into a single hump and under-detecting).
-/// The dicrotic notch sits around 2.5–3 Hz, so 2.5 Hz rolls it off while
-/// preserving the cardiac fundamental across the full resting range.
-const double kBandpassHighHz = 2.5;
+/// Bandpass upper cutoff (Hz). 4.0 Hz ≈ 240 bpm.
+/// Widened from 2.5 Hz to preserve the systolic upstroke's higher-frequency
+/// content and sharpen each peak for accurate beat-to-beat timing.  The
+/// previous 2.5 Hz cutoff over-rounded the systolic peak into a broad plateau,
+/// smearing genuine RR variability and biasing RMSSD low vs Polar H10.
+const double kBandpassHighHz = 4.0;
 
 class _BiquadCoeffs {
   final double b0, b1, b2, a1, a2;
