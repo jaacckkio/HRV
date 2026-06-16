@@ -4,7 +4,7 @@ class FrameRateDetector {
   FrameRateDetector();
 
   static const int _warmupFrames = 30;
-  static const double _defaultFPS = 30.0;
+  static const double _defaultFPS = 120.0;
   static const double _minStableFPS = 20.0;
   static const int _lowFpsStreakToUnstable = 3;
 
@@ -62,7 +62,7 @@ class FrameRateDetector {
   }
 
   double _snapToCommonFPS(double rawFPS) {
-    const commonRates = [24.0, 25.0, 30.0, 60.0];
+    const commonRates = [24.0, 25.0, 30.0, 60.0, 120.0];
     const tolerance = 2.0;
 
     for (final rate in commonRates) {

@@ -47,7 +47,7 @@ class _MeasurementScreenState extends State<MeasurementScreen>
   final List<double> _filteredHistory = [];
   final List<double> _rrHistory = [];
   final List<double> _sessionRRIntervals = [];
-  static const int _historyLimit = 150;
+  static const int _historyLimit = 750;
 
   // Live metrics — updated at 1 Hz via rolling ROI detection
   static const int _rollingWindowSeconds = 15;

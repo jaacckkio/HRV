@@ -35,7 +35,7 @@ class PPGConfig {
   final double fingerPresenceMax;
 
   const PPGConfig({
-    this.samplingRate = 30,
+    this.samplingRate = 120,
     this.windowSizeSeconds = 10,
     this.minRRMs = 300.0,
     this.maxRRMs = 2000.0,
