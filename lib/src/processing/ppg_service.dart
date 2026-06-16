@@ -40,6 +40,7 @@ class PPGService {
   double get lastMeanG => _lastMeanG;
   double get lastMeanB => _lastMeanB;
   double get effectiveFPS => _effectiveFrameRate();
+  int get fullFilteredSignalLength => _fullFilteredSignal.length;
 
   PPGService({
     this.config = const PPGConfig(),
@@ -309,6 +310,40 @@ class PPGService {
       filteredSignal: List<double>.from(_fullFilteredSignal),
       peakIndices: roiResult.peakIndices,
       interpolatedPeaks: roiResult.interpolatedPeaks,
+    );
+  }
+
+  /// Run ROI detection on a trailing window of the filtered signal for
+  /// live BPM computation. Returns RR intervals and peak indices mapped
+  /// to full-signal coordinates (for waveform beat-marker display).
+  /// Called at ~1 Hz from the UI; the window caps computation cost.
+  ({
+    List<double> rrIntervals,
+    List<int> peakIndicesInFullSignal,
+  }) computeRollingWindowDetection({int windowSeconds = 15}) {
+    final fps = _effectiveFrameRate();
+    final windowSamples = (windowSeconds * fps).round();
+    final signalLen = _fullFilteredSignal.length;
+
+    if (signalLen < 3 || fps <= 0) {
+      return (rrIntervals: <double>[], peakIndicesInFullSignal: <int>[]);
+    }
+
+    final startIdx =
+        signalLen > windowSamples ? signalLen - windowSamples : 0;
+    final window = _fullFilteredSignal.sublist(startIdx);
+
+    final roiResult = PeakDetector.findPeaksROI(window, fps);
+    final rrIntervals = _peakDetector.peaksToRRIntervalsInterpolated(
+        roiResult.interpolatedPeaks, fps);
+
+    // Map peak indices to full-signal coordinates
+    final peaksInFull =
+        roiResult.peakIndices.map((p) => p + startIdx).toList();
+
+    return (
+      rrIntervals: rrIntervals,
+      peakIndicesInFullSignal: peaksInFull,
     );
   }
 

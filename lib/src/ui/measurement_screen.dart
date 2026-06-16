@@ -44,13 +44,18 @@ class _MeasurementScreenState extends State<MeasurementScreen>
   AnimationController? _countdownController;
 
   // Data buffers for visualization
-  final List<double> _rawHistory = [];
   final List<double> _filteredHistory = [];
   final List<double> _rrHistory = [];
   final List<double> _sessionRRIntervals = [];
-  List<int> _currentPeakIndices = [];
   static const int _historyLimit = 150;
-  static const int _bpmWindowSize = 8;
+
+  // Live metrics — updated at 1 Hz via rolling ROI detection
+  static const int _rollingWindowSeconds = 15;
+  static const int _rmssdMinBeats = 20;
+  double? _liveBPM;
+  double? _liveRMSSD;
+  List<int> _livePeakIndicesInFull = [];
+  Timer? _liveMetricsTimer;
 
   // DEV TOOLING — recording state
   bool _isRecording = false;
@@ -116,11 +121,12 @@ class _MeasurementScreenState extends State<MeasurementScreen>
       _isScanning = true;
       _timeLeft = _selectedDuration;
       _showDurationPicker = false;
-      _rawHistory.clear();
       _filteredHistory.clear();
       _rrHistory.clear();
       _sessionRRIntervals.clear();
-      _currentPeakIndices = [];
+      _liveBPM = null;
+      _liveRMSSD = null;
+      _livePeakIndicesInFull = [];
       _currentSignal = null;
       _status = 'Starting...';
       _fingerFirstDetected = false;
@@ -164,6 +170,11 @@ class _MeasurementScreenState extends State<MeasurementScreen>
       }
     });
 
+    // Live metrics at 1 Hz (rolling ROI detection for BPM + RMSSD)
+    _liveMetricsTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (mounted && _isScanning) _updateLiveMetrics();
+    });
+
     // Start camera stream — process frames directly in callback
     try {
       await _controller!.startImageStream((CameraImage image) {
@@ -197,11 +208,8 @@ class _MeasurementScreenState extends State<MeasurementScreen>
       }
 
       // Accumulate visualization data
-      _rawHistory.add(signal.rawIntensity);
       _filteredHistory.add(signal.filteredIntensity);
-      if (_rawHistory.length > _historyLimit) _rawHistory.removeAt(0);
       if (_filteredHistory.length > _historyLimit) _filteredHistory.removeAt(0);
-      _currentPeakIndices = signal.peakIndices;
 
       // === Phase 1: Waiting for finger ===
       if (!_fingerFirstDetected) {
@@ -233,6 +241,7 @@ class _MeasurementScreenState extends State<MeasurementScreen>
             'wb=${_nativeLockResult!.whiteBalanceLocked} '
             'err=${_nativeLockResult!.error}');
         _ppgService?.clearSignalBuffers();
+        _filteredHistory.clear();
         // DEV TOOLING — mark clear point
         if (_isRecording) {
           _recordClearAtFrame = _recordedSamples.length;
@@ -278,8 +287,10 @@ class _MeasurementScreenState extends State<MeasurementScreen>
 
     _timer?.cancel();
     _uiUpdateTimer?.cancel();
+    _liveMetricsTimer?.cancel();
     _timer = null;
     _uiUpdateTimer = null;
+    _liveMetricsTimer = null;
     _countdownController?.stop();
 
     _isScanning = false;
@@ -479,18 +490,36 @@ class _MeasurementScreenState extends State<MeasurementScreen>
     setState(() => _showingHelp = false);
   }
 
-  double _meanRecentRR() {
-    if (_rrHistory.isEmpty) return 0.0;
-    final start = _rrHistory.length > _bpmWindowSize
-        ? _rrHistory.length - _bpmWindowSize
-        : 0;
-    double sum = 0.0;
-    int count = 0;
-    for (int i = start; i < _rrHistory.length; i++) {
-      sum += _rrHistory[i];
-      count++;
+  /// Recompute live BPM, RMSSD, and waveform peak markers at ~1 Hz.
+  /// Uses the same PeakDetector.findPeaksROI and HrvCalculator/artifact-filter
+  /// pipeline as the final end-of-measurement result.
+  void _updateLiveMetrics() {
+    if (_ppgService == null || !_exposureLocked) return;
+
+    // BPM — from trailing-window ROI detection (15 s window)
+    final windowResult = _ppgService!.computeRollingWindowDetection(
+        windowSeconds: _rollingWindowSeconds);
+    _livePeakIndicesInFull = windowResult.peakIndicesInFullSignal;
+
+    if (windowResult.rrIntervals.isNotEmpty) {
+      double sum = 0;
+      for (final rr in windowResult.rrIntervals) {
+        sum += rr;
+      }
+      _liveBPM = 60000.0 / (sum / windowResult.rrIntervals.length);
     }
-    return count == 0 ? 0.0 : sum / count;
+
+    // RMSSD — from full accumulated signal, through the same artifact filter
+    // and gap-aware RMSSD that HrvCalculator uses for the final result.
+    final fullResult = _ppgService!.computeFinalRRIntervals();
+    final allRR = fullResult.rrIntervals;
+
+    if (allRR.length >= _rmssdMinBeats) {
+      final hrvResult = HrvCalculator.compute(allRR);
+      if (hrvResult.rmssd > 0) {
+        _liveRMSSD = hrvResult.rmssd;
+      }
+    }
   }
 
   Color _qualityColor() {
@@ -506,6 +535,7 @@ class _MeasurementScreenState extends State<MeasurementScreen>
   void dispose() {
     _timer?.cancel();
     _uiUpdateTimer?.cancel();
+    _liveMetricsTimer?.cancel();
     _countdownController?.dispose();
     _controller?.dispose();
     _ppgService?.dispose();
@@ -516,14 +546,7 @@ class _MeasurementScreenState extends State<MeasurementScreen>
   @override
   Widget build(BuildContext context) {
     String hrDisplay = '--';
-    final meanRR = _meanRecentRR();
-    if (meanRR > 0) hrDisplay = '${(60000 / meanRR).round()}';
-
-    final snr = _currentSignal?.snr ?? 0.0;
-    final quality = _currentSignal?.quality ?? SignalQuality.poor;
-    final fps = _currentSignal?.frameRate ?? 0.0;
-    final fpsStable = _currentSignal?.isFPSStable ?? false;
-    final rejRatio = _currentSignal?.rejectionRatio ?? 0.0;
+    if (_liveBPM != null) hrDisplay = '${_liveBPM!.round()}';
 
     return Scaffold(
       appBar: AppBar(
@@ -591,34 +614,21 @@ class _MeasurementScreenState extends State<MeasurementScreen>
                                 _buildDurationButton(),
                             ],
                           ),
+                          const SizedBox(height: 4),
+                          Text(
+                            _liveRMSSD != null
+                                ? 'HRV (RMSSD): ${_liveRMSSD!.toStringAsFixed(1)} ms'
+                                : (_isScanning && _exposureLocked
+                                    ? 'HRV (RMSSD): building\u2026'
+                                    : 'HRV (RMSSD): \u2014'),
+                            style: const TextStyle(
+                                fontSize: 14, color: Colors.white70),
+                          ),
                           const SizedBox(height: 6),
                           Text(
                             _status,
                             style: TextStyle(color: _qualityColor(), fontSize: 13),
                           ),
-                          const SizedBox(height: 8),
-                          Text(
-                            'Quality: ${quality.name.toUpperCase()} | '
-                            'SNR: ${snr.toStringAsFixed(1)} dB',
-                            style:
-                                const TextStyle(fontSize: 11, color: Colors.grey),
-                          ),
-                          Text(
-                            'FPS: ${fps.toStringAsFixed(0)} '
-                            '${fpsStable ? "\u2713" : "\u23f3"} | '
-                            'Rej: ${(rejRatio * 100).toStringAsFixed(0)}% | '
-                            'RRs: ${_sessionRRIntervals.length}',
-                            style:
-                                const TextStyle(fontSize: 11, color: Colors.grey),
-                          ),
-                          if (_nativeLockResult != null)
-                            Text(
-                              'ExpLock: ${_nativeLockResult!.exposureLocked ? "\u2713" : "\u2717"} | '
-                              'FocLock: ${_nativeLockResult!.focusLocked ? "\u2713" : "\u2717"} | '
-                              'WBLock: ${_nativeLockResult!.whiteBalanceLocked ? "\u2713" : "\u2717"}',
-                              style:
-                                  const TextStyle(fontSize: 11, color: Colors.grey),
-                            ),
                         ],
                       ),
                     ),
@@ -630,12 +640,8 @@ class _MeasurementScreenState extends State<MeasurementScreen>
                 _buildDevToolbar(),
                 const SizedBox(height: 8),
 
-                // Waveforms
-                _buildWaveformCard(
-                    'Raw Signal (HSV Value)', _rawHistory, Colors.red.shade300, []),
-                const SizedBox(height: 10),
-                _buildWaveformCard('Filtered Signal (Bandpass)', _filteredHistory,
-                    Colors.greenAccent, _currentPeakIndices),
+                // Pulse waveform with beat markers
+                _buildPulseWaveformCard(),
                 const SizedBox(height: 10),
 
                 // RR intervals
@@ -932,6 +938,20 @@ class _MeasurementScreenState extends State<MeasurementScreen>
         ),
       ),
     );
+  }
+
+  Widget _buildPulseWaveformCard() {
+    // Map peak indices from full-signal coordinates to the display buffer
+    final fullLen = _ppgService?.fullFilteredSignalLength ?? 0;
+    final histLen = _filteredHistory.length;
+    final offset = fullLen - histLen;
+    final displayPeaks = <int>[];
+    for (final p in _livePeakIndicesInFull) {
+      final idx = p - offset;
+      if (idx >= 0 && idx < histLen) displayPeaks.add(idx);
+    }
+    return _buildWaveformCard(
+        'Pulse', _filteredHistory, Colors.greenAccent, displayPeaks);
   }
 
   Widget _buildRRHistoryCard() {
