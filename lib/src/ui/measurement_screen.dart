@@ -1276,21 +1276,17 @@ class _MeasurementScreenState extends State<MeasurementScreen>
                         children: [
                           _InstructionStep(
                               number: '1',
-                              text: 'Place your phone on a flat surface'),
+                              text:
+                                  'Cover the camera and flash with your fingertip'),
                           SizedBox(height: 12),
                           _InstructionStep(
                               number: '2',
-                              text:
-                                  'Cover the rear camera AND flash with your fingertip'),
+                              text: 'Hold as still as you can'),
                           SizedBox(height: 12),
                           _InstructionStep(
                               number: '3',
-                              text: "Press gently \u2014 don't push hard"),
-                          SizedBox(height: 12),
-                          _InstructionStep(
-                              number: '4',
                               text:
-                                  'Stay completely still for the duration'),
+                                  "Keep gentle, steady contact \u2014 don't press hard"),
                         ],
                       ),
                     ],
