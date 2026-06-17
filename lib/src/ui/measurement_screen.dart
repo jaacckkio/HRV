@@ -106,6 +106,15 @@ class _MeasurementScreenState extends State<MeasurementScreen>
   int _polarRRCount = 0;
   DateTime _lastPolarUiTick = DateTime(0);
 
+  // DEV TOOLING — live comparison metrics (computed at 1 Hz in _updateLiveMetrics)
+  double? _polarBPM;
+  HrvResult? _polarMetrics;
+  HrvResult? _cameraMetrics; // full-session HRV for comparison panel
+
+  // DEV TOOLING — Live (continuous) mode
+  bool _continuousMode = false;
+  int _elapsedSeconds = 0;
+
   @override
   void initState() {
     super.initState();
@@ -187,17 +196,26 @@ class _MeasurementScreenState extends State<MeasurementScreen>
       _recordStartWallClock = null;
       // Polar
       _polarRRCount = 0;
+      _polarBPM = null;
+      _polarMetrics = null;
+      _cameraMetrics = null;
+      // Live mode
+      _elapsedSeconds = 0;
     });
 
     // Clear Polar packets for fresh session
     _polarService?.clearPackets();
 
     _countdownController?.dispose();
-    _countdownController = AnimationController(
-      vsync: this,
-      duration: Duration(seconds: _selectedDuration),
-    );
-    _countdownController!.forward();
+    if (!_continuousMode) {
+      _countdownController = AnimationController(
+        vsync: this,
+        duration: Duration(seconds: _selectedDuration),
+      );
+      _countdownController!.forward();
+    } else {
+      _countdownController = null;
+    }
 
     WakelockPlus.enable();
 
@@ -213,11 +231,15 @@ class _MeasurementScreenState extends State<MeasurementScreen>
       debugPrint('Flash error: $e');
     }
 
-    // Countdown timer
+    // Countdown timer (or count-up in continuous mode)
     _timer = Timer.periodic(const Duration(seconds: 1), (_) {
       if (mounted && _isScanning) {
-        setState(() => _timeLeft--);
-        if (_timeLeft <= 0) _stopProcessing();
+        if (_continuousMode) {
+          setState(() => _elapsedSeconds++);
+        } else {
+          setState(() => _timeLeft--);
+          if (_timeLeft <= 0) _stopProcessing();
+        }
       }
     });
 
@@ -633,6 +655,7 @@ class _MeasurementScreenState extends State<MeasurementScreen>
 
     if (allRR.length >= _rmssdMinBeats) {
       final hrvResult = HrvCalculator.compute(allRR);
+      _cameraMetrics = hrvResult;
       if (hrvResult.rmssd > 0) {
         _liveRMSSD = hrvResult.rmssd;
 
@@ -651,6 +674,32 @@ class _MeasurementScreenState extends State<MeasurementScreen>
             }
           }
         }
+      }
+    }
+
+    // DEV TOOLING — Polar metrics (same artifact-filter + HrvCalculator path)
+    if (kShowDevTools &&
+        _polarService != null &&
+        _polarState == PolarConnectionState.connected) {
+      final polarRR = _polarService!.allRRIntervalsMs;
+
+      // BPM — trailing ~15 s window (same semantics as camera's rolling window)
+      if (polarRR.isNotEmpty) {
+        double windowSum = 0;
+        int windowCount = 0;
+        for (int i = polarRR.length - 1; i >= 0; i--) {
+          windowSum += polarRR[i];
+          windowCount++;
+          if (windowSum >= _rollingWindowSeconds * 1000) break;
+        }
+        if (windowCount > 0) {
+          _polarBPM = 60000.0 / (windowSum / windowCount);
+        }
+      }
+
+      // RMSSD / SDNN / meanRR / beats — full session through HrvCalculator
+      if (polarRR.length >= _rmssdMinBeats) {
+        _polarMetrics = HrvCalculator.compute(polarRR);
       }
     }
   }
@@ -751,7 +800,12 @@ class _MeasurementScreenState extends State<MeasurementScreen>
                   const SizedBox(height: 20),
                   _buildPulseWaveformCard(),
                   const SizedBox(height: 12),
-                  _buildRmssdStrip(),
+                  if (kShowDevTools &&
+                      _isScanning &&
+                      _polarState == PolarConnectionState.connected)
+                    _buildComparisonPanel()
+                  else
+                    _buildRmssdStrip(),
                   if (kShowDevTools) ...[
                     const SizedBox(height: 12),
                     _buildRRHistoryCard(),
@@ -760,8 +814,9 @@ class _MeasurementScreenState extends State<MeasurementScreen>
                 ],
               ),
             ),
-            // Start button — State A only
+            // Start button — State A only (or Stop in continuous mode)
             if (!_isScanning) _buildStartButton(),
+            if (_isScanning && _continuousMode) _buildStopButton(),
             // Duration picker overlay
             if (_showDurationPicker && !_isScanning) _buildDurationPicker(),
             // Help overlay
@@ -777,9 +832,11 @@ class _MeasurementScreenState extends State<MeasurementScreen>
   // ---------------------------------------------------------------------------
 
   Widget _buildDurationSelector() {
-    final label = _selectedDuration >= 60
-        ? '${_selectedDuration ~/ 60}m'
-        : '${_selectedDuration}s';
+    final label = _continuousMode
+        ? 'Live'
+        : _selectedDuration >= 60
+            ? '${_selectedDuration ~/ 60}m'
+            : '${_selectedDuration}s';
     final active = !_isScanning;
     final color = active ? _teal : _textSecondary.withOpacity(0.4);
 
@@ -891,7 +948,9 @@ class _MeasurementScreenState extends State<MeasurementScreen>
                                 fontWeight: FontWeight.w500)),
                       const SizedBox(height: 10),
                       Text(
-                        _formatTimeLeft(),
+                        _continuousMode
+                            ? _formatElapsed()
+                            : _formatTimeLeft(),
                         style: TextStyle(
                             fontSize: 13,
                             color: Colors.white.withOpacity(0.55)),
@@ -905,7 +964,7 @@ class _MeasurementScreenState extends State<MeasurementScreen>
       );
     }
 
-    if (_isScanning && _countdownController != null) {
+    if (_isScanning && !_continuousMode && _countdownController != null) {
       return AnimatedBuilder(
         animation: _countdownController!,
         builder: (context, child) {
@@ -1036,6 +1095,151 @@ class _MeasurementScreenState extends State<MeasurementScreen>
           child: const Text('Start',
               style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
         ),
+      ),
+    );
+  }
+
+  Widget _buildStopButton() {
+    return Positioned(
+      left: 20,
+      right: 20,
+      bottom: 24,
+      child: SizedBox(
+        height: 52,
+        child: ElevatedButton(
+          onPressed: _isTransitioning ? null : _stopProcessing,
+          style: ElevatedButton.styleFrom(
+            backgroundColor: _error,
+            foregroundColor: Colors.white,
+            disabledBackgroundColor: Colors.grey.shade300,
+            shape:
+                RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+            elevation: 0,
+          ),
+          child: const Text('Stop',
+              style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+        ),
+      ),
+    );
+  }
+
+  // DEV TOOLING — Camera vs Polar comparison panel
+  Widget _buildComparisonPanel() {
+    // Camera values — BPM reads from _liveBPM (same as hero circle)
+    final camBPM =
+        _bpmSettled && _liveBPM != null ? '${_liveBPM!.round()}' : '\u2014';
+    final camRMSSD = _rmssdSettled && _liveRMSSD != null
+        ? _liveRMSSD!.toStringAsFixed(1)
+        : '\u2014';
+
+    // Camera full-session HRV for SDNN / meanRR / beats (from 1 Hz update)
+    final camSDNN = _cameraMetrics != null
+        ? _cameraMetrics!.sdnn.toStringAsFixed(1)
+        : '\u2014';
+    final camMeanRR = _cameraMetrics != null
+        ? _cameraMetrics!.meanRR.round().toString()
+        : '\u2014';
+    final camBeats = _cameraMetrics != null
+        ? '${_cameraMetrics!.totalIntervals}'
+        : '\u2014';
+
+    // Polar values
+    final polBPM =
+        _polarBPM != null ? '${_polarBPM!.round()}' : '\u2014';
+    final polRMSSD = _polarMetrics != null && _polarMetrics!.rmssd > 0
+        ? _polarMetrics!.rmssd.toStringAsFixed(1)
+        : '\u2014';
+    final polSDNN = _polarMetrics != null && _polarMetrics!.sdnn > 0
+        ? _polarMetrics!.sdnn.toStringAsFixed(1)
+        : '\u2014';
+    final polMeanRR = _polarMetrics != null && _polarMetrics!.meanRR > 0
+        ? _polarMetrics!.meanRR.round().toString()
+        : '\u2014';
+    final polBeats = _polarMetrics != null
+        ? '${_polarMetrics!.totalIntervals}'
+        : '\u2014';
+
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: _cardDecoration(),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text('Camera vs Polar',
+              style: TextStyle(
+                  fontSize: 11,
+                  color: _textSecondary,
+                  fontWeight: FontWeight.w600)),
+          const SizedBox(height: 8),
+          _comparisonRow(
+            label: 'Camera',
+            labelColor: _teal,
+            bpm: camBPM,
+            rmssd: camRMSSD,
+            sdnn: camSDNN,
+            meanRR: camMeanRR,
+            beats: camBeats,
+          ),
+          const Divider(height: 12, thickness: 0.5, color: _border),
+          _comparisonRow(
+            label: 'Polar',
+            labelColor: const Color(0xFF2E7D32),
+            bpm: polBPM,
+            rmssd: polRMSSD,
+            sdnn: polSDNN,
+            meanRR: polMeanRR,
+            beats: polBeats,
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _comparisonRow({
+    required String label,
+    required Color labelColor,
+    required String bpm,
+    required String rmssd,
+    required String sdnn,
+    required String meanRR,
+    required String beats,
+  }) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(label,
+            style: TextStyle(
+                fontSize: 11, fontWeight: FontWeight.bold, color: labelColor)),
+        const SizedBox(height: 4),
+        Row(
+          children: [
+            _metricCell('BPM', bpm),
+            _metricCell('RMSSD', rmssd),
+            _metricCell('SDNN', sdnn),
+            _metricCell('RR', meanRR),
+            _metricCell('Beats', beats),
+          ],
+        ),
+      ],
+    );
+  }
+
+  Widget _metricCell(String label, String value) {
+    return Expanded(
+      child: Column(
+        children: [
+          Text(label,
+              style: const TextStyle(
+                  fontSize: 9,
+                  color: _textSecondary,
+                  fontWeight: FontWeight.w500)),
+          const SizedBox(height: 2),
+          Text(value,
+              style: const TextStyle(
+                  fontSize: 14,
+                  fontWeight: FontWeight.bold,
+                  color: _textPrimary)),
+        ],
       ),
     );
   }
@@ -1207,12 +1411,21 @@ class _MeasurementScreenState extends State<MeasurementScreen>
     return '${_timeLeft}s';
   }
 
+  String _formatElapsed() {
+    final mins = _elapsedSeconds ~/ 60;
+    final secs = _elapsedSeconds % 60;
+    return '$mins:${secs.toString().padLeft(2, '0')}';
+  }
+
   Widget _buildDurationPicker() {
-    const options = [
-      (duration: 60, label: '60 seconds'),
-      (duration: 120, label: '2 minutes'),
-      (duration: 180, label: '3 minutes'),
+    final options = [
+      (duration: 60, label: '60 seconds', isLive: false),
+      (duration: 120, label: '2 minutes', isLive: false),
+      (duration: 180, label: '3 minutes', isLive: false),
+      if (kShowDevTools)
+        (duration: 0, label: 'Live (continuous)', isLive: true),
     ];
+    final totalOptions = options.length;
 
     return Positioned(
       top: 40,
@@ -1236,11 +1449,16 @@ class _MeasurementScreenState extends State<MeasurementScreen>
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              for (int i = 0; i < options.length; i++)
+              for (int i = 0; i < totalOptions; i++)
                 GestureDetector(
                   onTap: () {
                     setState(() {
-                      _selectedDuration = options[i].duration;
+                      if (options[i].isLive) {
+                        _continuousMode = true;
+                      } else {
+                        _continuousMode = false;
+                        _selectedDuration = options[i].duration;
+                      }
                       _showDurationPicker = false;
                     });
                   },
@@ -1248,17 +1466,22 @@ class _MeasurementScreenState extends State<MeasurementScreen>
                     padding: const EdgeInsets.symmetric(
                         horizontal: 20, vertical: 14),
                     decoration: BoxDecoration(
-                      color: _selectedDuration == options[i].duration
-                          ? _teal.withOpacity(0.08)
-                          : Colors.transparent,
-                      border: i < options.length - 1
+                      color: options[i].isLive
+                          ? (_continuousMode
+                              ? _teal.withOpacity(0.08)
+                              : Colors.transparent)
+                          : (!_continuousMode &&
+                                  _selectedDuration == options[i].duration
+                              ? _teal.withOpacity(0.08)
+                              : Colors.transparent),
+                      border: i < totalOptions - 1
                           ? const Border(
                               bottom: BorderSide(color: _border, width: 0.5))
                           : null,
                       borderRadius: i == 0
                           ? const BorderRadius.vertical(
                               top: Radius.circular(12))
-                          : i == options.length - 1
+                          : i == totalOptions - 1
                               ? const BorderRadius.vertical(
                                   bottom: Radius.circular(12))
                               : null,
@@ -1269,17 +1492,28 @@ class _MeasurementScreenState extends State<MeasurementScreen>
                         Text(
                           options[i].label,
                           style: TextStyle(
-                            color: _selectedDuration == options[i].duration
+                            color: (options[i].isLive
+                                    ? _continuousMode
+                                    : (!_continuousMode &&
+                                        _selectedDuration ==
+                                            options[i].duration))
                                 ? _teal
                                 : _textPrimary,
                             fontSize: 14,
-                            fontWeight:
-                                _selectedDuration == options[i].duration
-                                    ? FontWeight.w600
-                                    : FontWeight.normal,
+                            fontWeight: (options[i].isLive
+                                    ? _continuousMode
+                                    : (!_continuousMode &&
+                                        _selectedDuration ==
+                                            options[i].duration))
+                                ? FontWeight.w600
+                                : FontWeight.normal,
                           ),
                         ),
-                        if (_selectedDuration == options[i].duration) ...[
+                        if (options[i].isLive
+                            ? _continuousMode
+                            : (!_continuousMode &&
+                                _selectedDuration ==
+                                    options[i].duration)) ...[
                           const SizedBox(width: 8),
                           const Icon(Icons.check, size: 16, color: _teal),
                         ],

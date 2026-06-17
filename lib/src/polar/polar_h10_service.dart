@@ -70,6 +70,18 @@ class PolarH10Service {
   final List<PolarRRPacket> _packets = [];
   List<PolarRRPacket> get packets => List.unmodifiable(_packets);
 
+  /// All RR intervals from the session in arrival order, as doubles (ms).
+  /// Flattens every packet's rrIntervalsMs list chronologically.
+  List<double> get allRRIntervalsMs {
+    final out = <double>[];
+    for (final p in _packets) {
+      for (final rr in p.rrIntervalsMs) {
+        out.add(rr.toDouble());
+      }
+    }
+    return out;
+  }
+
   // Callback for UI updates — throttled by the caller
   void Function(PolarConnectionState state)? onStateChanged;
   void Function(PolarRRPacket packet)? onRRPacket;
