@@ -36,6 +36,7 @@ class PPGService {
   double _lastMeanR = 0, _lastMeanG = 0, _lastMeanB = 0;
 
   int get lastFrameMicros => _lastFrameMicros;
+  int get sessionElapsedMicros => _nowMicros();
   double get lastMeanR => _lastMeanR;
   double get lastMeanG => _lastMeanG;
   double get lastMeanB => _lastMeanB;

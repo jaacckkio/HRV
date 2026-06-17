@@ -11,6 +11,7 @@ import '../camera/camera_control.dart';
 import '../recording/ppg_recording.dart';
 import 'widgets/waveform_painter.dart';
 import 'widgets/finger_guide_animation.dart';
+import '../polar/polar_h10_service.dart';
 import 'results_screen.dart';
 
 /// Set to true to show developer scaffolding (FPS line, record/replay
@@ -97,6 +98,14 @@ class _MeasurementScreenState extends State<MeasurementScreen>
   int _recordClearAtFrame = -1;
   String? _recordStartWallClock;
 
+  // DEV TOOLING — Polar H10 BLE
+  PolarH10Service? _polarService;
+  PolarConnectionState _polarState = PolarConnectionState.disconnected;
+  String? _polarError;
+  int _polarLatestHR = 0;
+  int _polarRRCount = 0;
+  DateTime _lastPolarUiTick = DateTime(0);
+
   @override
   void initState() {
     super.initState();
@@ -176,7 +185,12 @@ class _MeasurementScreenState extends State<MeasurementScreen>
       _recordedSamples.clear();
       _recordClearAtFrame = -1;
       _recordStartWallClock = null;
+      // Polar
+      _polarRRCount = 0;
     });
+
+    // Clear Polar packets for fresh session
+    _polarService?.clearPackets();
 
     _countdownController?.dispose();
     _countdownController = AnimationController(
@@ -535,6 +549,45 @@ class _MeasurementScreenState extends State<MeasurementScreen>
     setState(() => _showingHelp = false);
   }
 
+  // DEV TOOLING — Polar H10 BLE
+  void _polarConnect() {
+    if (_polarService != null) return;
+    _polarService = PolarH10Service(
+      nowMicros: () => _ppgService?.sessionElapsedMicros ?? 0,
+    );
+    _polarService!.onStateChanged = (s) {
+      if (!mounted) return;
+      setState(() {
+        _polarState = s;
+        _polarError = _polarService?.errorMessage;
+      });
+    };
+    _polarService!.onRRPacket = (packet) {
+      if (!mounted) return;
+      _polarLatestHR = packet.hr;
+      _polarRRCount += packet.rrIntervalsMs.length;
+      final now = DateTime.now();
+      if (now.difference(_lastPolarUiTick).inMilliseconds >= 300) {
+        _lastPolarUiTick = now;
+        setState(() {});
+      }
+    };
+    _polarService!.startScan();
+  }
+
+  Future<void> _polarDisconnect() async {
+    await _polarService?.dispose();
+    _polarService = null;
+    if (mounted) {
+      setState(() {
+        _polarState = PolarConnectionState.disconnected;
+        _polarError = null;
+        _polarLatestHR = 0;
+        _polarRRCount = 0;
+      });
+    }
+  }
+
   /// Recompute live BPM, RMSSD, and waveform peak markers at ~1 Hz.
   /// Uses the same PeakDetector.findPeaksROI and HrvCalculator/artifact-filter
   /// pipeline as the final end-of-measurement result.
@@ -610,6 +663,7 @@ class _MeasurementScreenState extends State<MeasurementScreen>
     _countdownController?.dispose();
     _controller?.dispose();
     _ppgService?.dispose();
+    _polarService?.dispose();
     WakelockPlus.disable();
     super.dispose();
   }
@@ -691,6 +745,8 @@ class _MeasurementScreenState extends State<MeasurementScreen>
                   if (kShowDevTools) ...[
                     const SizedBox(height: 8),
                     _buildDevToolbar(),
+                    const SizedBox(height: 6),
+                    _buildPolarStrip(),
                   ],
                   const SizedBox(height: 20),
                   _buildPulseWaveformCard(),
@@ -1046,6 +1102,79 @@ class _MeasurementScreenState extends State<MeasurementScreen>
               overflow: TextOverflow.ellipsis,
             ),
           ),
+        ],
+      ),
+    );
+  }
+
+  // DEV TOOLING — Polar H10 connection strip
+  Widget _buildPolarStrip() {
+    final stateLabel = switch (_polarState) {
+      PolarConnectionState.disconnected => 'Not connected',
+      PolarConnectionState.scanning => 'Scanning\u2026',
+      PolarConnectionState.connecting =>
+        'Connecting to ${_polarService?.deviceName ?? "Polar"}\u2026',
+      PolarConnectionState.connected =>
+        '${_polarService?.deviceName ?? "Polar"} \u2014 HR: $_polarLatestHR  RR: $_polarRRCount',
+      PolarConnectionState.error => _polarError ?? 'Error',
+    };
+
+    final isError = _polarState == PolarConnectionState.error;
+    final isConnected = _polarState == PolarConnectionState.connected;
+    final isBusy = _polarState == PolarConnectionState.scanning ||
+        _polarState == PolarConnectionState.connecting;
+
+    final bgColor = isError
+        ? const Color(0xFFFFEBEE)
+        : isConnected
+            ? const Color(0xFFE8F5E9)
+            : const Color(0xFFF3E5F5);
+    final borderColor = isError
+        ? const Color(0xFFE57373)
+        : isConnected
+            ? const Color(0xFF81C784)
+            : const Color(0xFFCE93D8);
+    final textColor = isError
+        ? const Color(0xFFC62828)
+        : isConnected
+            ? const Color(0xFF2E7D32)
+            : const Color(0xFF6A1B9A);
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+      decoration: BoxDecoration(
+        color: bgColor,
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: borderColor),
+      ),
+      child: Row(
+        children: [
+          Icon(Icons.bluetooth,
+              size: 14,
+              color: isConnected ? const Color(0xFF2E7D32) : textColor),
+          const SizedBox(width: 4),
+          Expanded(
+            child: Text(
+              stateLabel,
+              style: TextStyle(
+                  fontSize: 10, fontWeight: FontWeight.w600, color: textColor),
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+          const SizedBox(width: 4),
+          if (!isConnected && !isBusy)
+            _devButton('Connect', _polarConnect),
+          if (isConnected)
+            _devButton('Disconnect', _polarDisconnect),
+          if (isBusy)
+            SizedBox(
+              width: 14,
+              height: 14,
+              child: CircularProgressIndicator(
+                strokeWidth: 2,
+                color: textColor,
+              ),
+            ),
         ],
       ),
     );
