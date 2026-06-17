@@ -16,7 +16,7 @@ import 'results_screen.dart';
 
 /// Set to true to show developer scaffolding (FPS line, record/replay
 /// toolbar, RR history card, debug panels). Set to false for production.
-const bool kShowDevTools = false;
+const bool kShowDevTools = true;
 
 // TODO: Apply Mont font family when the host team adds it to the asset bundle.
 // Using system default font for now.
