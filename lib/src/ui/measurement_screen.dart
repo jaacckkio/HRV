@@ -633,66 +633,84 @@ class _MeasurementScreenState extends State<MeasurementScreen>
   void _updateLiveMetrics() {
     if (_ppgService == null || !_exposureLocked) return;
 
+    final fingerNow = _currentSignal?.fingerDetected ?? false;
+
+    // Suspend all camera metrics while finger is absent — avoids showing
+    // stale or noise-derived values. When the finger returns, settle checks
+    // will re-gate display. Polar side is independent and keeps streaming.
+    if (!fingerNow) {
+      _liveBPM = null;
+      _liveRMSSD = null;
+      _cameraMetrics = null;
+      _bpmSettled = false;
+      _rmssdSettled = false;
+      _bpmHistory.clear();
+      _rmssdHistory.clear();
+      // Skip camera computation but still compute Polar below
+    }
+
     final measElapsed = _measuringStartTime != null
         ? DateTime.now().difference(_measuringStartTime!).inSeconds
         : 0;
 
-    // BPM — from trailing-window ROI detection (15 s window)
-    final windowResult = _ppgService!.computeRollingWindowDetection(
-        windowSeconds: _rollingWindowSeconds);
-    _livePeakIndicesInFull = windowResult.peakIndicesInFullSignal;
+    if (fingerNow) {
+      // BPM — from trailing-window ROI detection (15 s window)
+      final windowResult = _ppgService!.computeRollingWindowDetection(
+          windowSeconds: _rollingWindowSeconds);
+      _livePeakIndicesInFull = windowResult.peakIndicesInFullSignal;
 
-    if (windowResult.rrIntervals.isNotEmpty) {
-      double sum = 0;
-      for (final rr in windowResult.rrIntervals) {
-        sum += rr;
-      }
-      _liveBPM = 60000.0 / (sum / windowResult.rrIntervals.length);
-
-      // BPM settle check
-      if (!_bpmSettled && _liveBPM != null) {
-        _bpmHistory.add(_liveBPM!);
-        if (_bpmHistory.length > _settleHistoryLen) {
-          _bpmHistory.removeAt(0);
+      if (windowResult.rrIntervals.isNotEmpty) {
+        double sum = 0;
+        for (final rr in windowResult.rrIntervals) {
+          sum += rr;
         }
-        if (measElapsed >= _bpmMinSeconds &&
-            _bpmHistory.length >= _settleHistoryLen) {
-          final spread = _bpmHistory.reduce(max) - _bpmHistory.reduce(min);
-          if (spread <= _bpmSettleTolerance * 2) {
-            _bpmSettled = true;
+        _liveBPM = 60000.0 / (sum / windowResult.rrIntervals.length);
+
+        // BPM settle check
+        if (!_bpmSettled && _liveBPM != null) {
+          _bpmHistory.add(_liveBPM!);
+          if (_bpmHistory.length > _settleHistoryLen) {
+            _bpmHistory.removeAt(0);
           }
-        }
-      }
-    }
-
-    // RMSSD — from full accumulated signal, through the same artifact filter
-    // and gap-aware RMSSD that HrvCalculator uses for the final result.
-    final fullResult = _ppgService!.computeFinalRRIntervals();
-    final allRR = fullResult.rrIntervals;
-
-    if (allRR.length >= _rmssdMinBeats) {
-      final hrvResult = HrvCalculator.compute(allRR);
-      _cameraMetrics = hrvResult;
-      if (hrvResult.rmssd > 0) {
-        _liveRMSSD = hrvResult.rmssd;
-
-        // RMSSD settle check
-        if (!_rmssdSettled) {
-          _rmssdHistory.add(_liveRMSSD!);
-          if (_rmssdHistory.length > _settleHistoryLen) {
-            _rmssdHistory.removeAt(0);
-          }
-          if (measElapsed >= _rmssdMinSeconds &&
-              _rmssdHistory.length >= _settleHistoryLen) {
-            final spread =
-                _rmssdHistory.reduce(max) - _rmssdHistory.reduce(min);
-            if (spread <= _rmssdSettleTolerance * 2) {
-              _rmssdSettled = true;
+          if (measElapsed >= _bpmMinSeconds &&
+              _bpmHistory.length >= _settleHistoryLen) {
+            final spread = _bpmHistory.reduce(max) - _bpmHistory.reduce(min);
+            if (spread <= _bpmSettleTolerance * 2) {
+              _bpmSettled = true;
             }
           }
         }
       }
-    }
+
+      // RMSSD — from full accumulated signal, through the same artifact filter
+      // and gap-aware RMSSD that HrvCalculator uses for the final result.
+      final fullResult = _ppgService!.computeFinalRRIntervals();
+      final allRR = fullResult.rrIntervals;
+
+      if (allRR.length >= _rmssdMinBeats) {
+        final hrvResult = HrvCalculator.compute(allRR);
+        _cameraMetrics = hrvResult;
+        if (hrvResult.rmssd > 0) {
+          _liveRMSSD = hrvResult.rmssd;
+
+          // RMSSD settle check
+          if (!_rmssdSettled) {
+            _rmssdHistory.add(_liveRMSSD!);
+            if (_rmssdHistory.length > _settleHistoryLen) {
+              _rmssdHistory.removeAt(0);
+            }
+            if (measElapsed >= _rmssdMinSeconds &&
+                _rmssdHistory.length >= _settleHistoryLen) {
+              final spread =
+                  _rmssdHistory.reduce(max) - _rmssdHistory.reduce(min);
+              if (spread <= _rmssdSettleTolerance * 2) {
+                _rmssdSettled = true;
+              }
+            }
+          }
+        }
+      }
+    } // end fingerNow
 
     // DEV TOOLING — Polar metrics (same artifact-filter + HrvCalculator path)
     if (kShowDevTools &&

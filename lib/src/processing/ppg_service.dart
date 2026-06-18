@@ -25,6 +25,7 @@ class PPGService {
   late RingBuffer<double> _rawBuffer;
   late RingBuffer<double> _filteredBuffer;
   final List<double> _fullFilteredSignal = [];
+  final List<bool> _fullFingerPresent = [];
   static const PeakDetector _peakDetector = PeakDetector();
   final Stopwatch _frameStopwatch = Stopwatch();
   bool _buffersResized = false;
@@ -66,6 +67,7 @@ class PPGService {
     _rawBuffer.clear();
     _filteredBuffer.clear();
     _fullFilteredSignal.clear();
+    _fullFingerPresent.clear();
     _frameRateDetector.reset();
     _frameStopwatch.stop();
     _lastReportedPeakCount = 0;
@@ -78,6 +80,7 @@ class PPGService {
     _rawBuffer.clear();
     _filteredBuffer.clear();
     _fullFilteredSignal.clear();
+    _fullFingerPresent.clear();
     _frameRateDetector.reset();
     _frameStopwatch.stop();
     _buffersResized = false;
@@ -104,6 +107,7 @@ class PPGService {
     _rawBuffer.clear();
     _filteredBuffer.clear();
     _fullFilteredSignal.clear();
+    _fullFingerPresent.clear();
     _lastReportedPeakCount = 0;
     _butterworthFilter?.reset();
   }
@@ -213,6 +217,7 @@ class PPGService {
     }
     _filteredBuffer.add(filteredPoint);
     _fullFilteredSignal.add(filteredPoint);
+    _fullFingerPresent.add(fingerDetected);
 
     // If quality is poor or FPS not stable, return early
     if (quality == SignalQuality.poor || !_frameRateDetector.isStable) {
@@ -283,6 +288,10 @@ class PPGService {
   /// Run ROI peak detection ONCE on the full filtered signal and return
   /// the final RR-interval series, selected window, filtered signal, and peaks.
   /// Call at end-of-measurement for the definitive HRV computation.
+  ///
+  /// Peak detection is run per contiguous finger-present segment so that no
+  /// RR interval spans a finger-off gap. Runs shorter than ~1.5 beats
+  /// (1.5 * fps samples) are skipped as too short for a reliable beat.
   ({
     List<double> rrIntervals,
     double selectedWindowSec,
@@ -301,16 +310,56 @@ class PPGService {
       );
     }
 
-    final roiResult = PeakDetector.findPeaksROI(_fullFilteredSignal, fps);
-    final rrIntervals = _peakDetector.peaksToRRIntervalsInterpolated(
-        roiResult.interpolatedPeaks, fps);
+    final runs = _findFingerPresentRuns(
+        _fullFingerPresent, 0, _fullFilteredSignal.length, fps);
+
+    // If no gaps, fast path — identical to the original code
+    if (runs.length == 1 &&
+        runs[0].$1 == 0 &&
+        runs[0].$2 == _fullFilteredSignal.length) {
+      final roiResult = PeakDetector.findPeaksROI(_fullFilteredSignal, fps);
+      final rrIntervals = _peakDetector.peaksToRRIntervalsInterpolated(
+          roiResult.interpolatedPeaks, fps);
+      return (
+        rrIntervals: rrIntervals,
+        selectedWindowSec: roiResult.selectedWindowSec,
+        filteredSignal: List<double>.from(_fullFilteredSignal),
+        peakIndices: roiResult.peakIndices,
+        interpolatedPeaks: roiResult.interpolatedPeaks,
+      );
+    }
+
+    // Segmented path — detect peaks per run, never across gaps
+    final allRR = <double>[];
+    final allPeakIndices = <int>[];
+    final allInterpolatedPeaks = <double>[];
+    double selectedWindow = 0.75;
+
+    for (final (start, length) in runs) {
+      final segment = _fullFilteredSignal.sublist(start, start + length);
+      final roiResult = PeakDetector.findPeaksROI(segment, fps);
+      selectedWindow = roiResult.selectedWindowSec;
+
+      // Offset peaks back to full-signal coordinates
+      for (final p in roiResult.peakIndices) {
+        allPeakIndices.add(p + start);
+      }
+      for (final p in roiResult.interpolatedPeaks) {
+        allInterpolatedPeaks.add(p + start);
+      }
+
+      // RR intervals within this run only
+      final segRR = _peakDetector.peaksToRRIntervalsInterpolated(
+          roiResult.interpolatedPeaks, fps);
+      allRR.addAll(segRR);
+    }
 
     return (
-      rrIntervals: rrIntervals,
-      selectedWindowSec: roiResult.selectedWindowSec,
+      rrIntervals: allRR,
+      selectedWindowSec: selectedWindow,
       filteredSignal: List<double>.from(_fullFilteredSignal),
-      peakIndices: roiResult.peakIndices,
-      interpolatedPeaks: roiResult.interpolatedPeaks,
+      peakIndices: allPeakIndices,
+      interpolatedPeaks: allInterpolatedPeaks,
     );
   }
 
@@ -318,6 +367,8 @@ class PPGService {
   /// live BPM computation. Returns RR intervals and peak indices mapped
   /// to full-signal coordinates (for waveform beat-marker display).
   /// Called at ~1 Hz from the UI; the window caps computation cost.
+  ///
+  /// Peak detection is segmented by finger presence — no RR spans a gap.
   ({
     List<double> rrIntervals,
     List<int> peakIndicesInFullSignal,
@@ -332,20 +383,82 @@ class PPGService {
 
     final startIdx =
         signalLen > windowSamples ? signalLen - windowSamples : 0;
-    final window = _fullFilteredSignal.sublist(startIdx);
+    final windowLen = signalLen - startIdx;
 
-    final roiResult = PeakDetector.findPeaksROI(window, fps);
-    final rrIntervals = _peakDetector.peaksToRRIntervalsInterpolated(
-        roiResult.interpolatedPeaks, fps);
+    final runs = _findFingerPresentRuns(
+        _fullFingerPresent, startIdx, windowLen, fps);
 
-    // Map peak indices to full-signal coordinates
-    final peaksInFull =
-        roiResult.peakIndices.map((p) => p + startIdx).toList();
+    // If no gaps in this window, fast path
+    if (runs.length == 1 &&
+        runs[0].$1 == startIdx &&
+        runs[0].$2 == windowLen) {
+      final window = _fullFilteredSignal.sublist(startIdx);
+      final roiResult = PeakDetector.findPeaksROI(window, fps);
+      final rrIntervals = _peakDetector.peaksToRRIntervalsInterpolated(
+          roiResult.interpolatedPeaks, fps);
+      final peaksInFull =
+          roiResult.peakIndices.map((p) => p + startIdx).toList();
+      return (
+        rrIntervals: rrIntervals,
+        peakIndicesInFullSignal: peaksInFull,
+      );
+    }
+
+    // Segmented path
+    final allRR = <double>[];
+    final allPeaks = <int>[];
+
+    for (final (runStart, runLen) in runs) {
+      final segment =
+          _fullFilteredSignal.sublist(runStart, runStart + runLen);
+      final roiResult = PeakDetector.findPeaksROI(segment, fps);
+      final segRR = _peakDetector.peaksToRRIntervalsInterpolated(
+          roiResult.interpolatedPeaks, fps);
+      allRR.addAll(segRR);
+      for (final p in roiResult.peakIndices) {
+        allPeaks.add(p + runStart);
+      }
+    }
 
     return (
-      rrIntervals: rrIntervals,
-      peakIndicesInFullSignal: peaksInFull,
+      rrIntervals: allRR,
+      peakIndicesInFullSignal: allPeaks,
     );
+  }
+
+  /// Find contiguous runs of finger-present (true) samples within a slice
+  /// of [mask] starting at [sliceStart] for [sliceLen] samples. Runs shorter
+  /// than 1.5 * fps are skipped (too short for a reliable beat).
+  /// Returns a list of (startIndex, length) in full-signal coordinates.
+  static List<(int, int)> _findFingerPresentRuns(
+      List<bool> mask, int sliceStart, int sliceLen, double fps) {
+    final minRunLen = (1.5 * fps).round();
+    final runs = <(int, int)>[];
+    final sliceEnd = sliceStart + sliceLen;
+
+    // Guard: if mask is shorter than signal (e.g. early samples before
+    // quality assessment), treat missing entries as finger-present to
+    // preserve backward compatibility.
+    int runStart = -1;
+    for (int i = sliceStart; i < sliceEnd; i++) {
+      final present = i < mask.length ? mask[i] : true;
+      if (present) {
+        if (runStart < 0) runStart = i;
+      } else {
+        if (runStart >= 0) {
+          final len = i - runStart;
+          if (len >= minRunLen) runs.add((runStart, len));
+          runStart = -1;
+        }
+      }
+    }
+    // Close trailing run
+    if (runStart >= 0) {
+      final len = sliceEnd - runStart;
+      if (len >= minRunLen) runs.add((runStart, len));
+    }
+
+    return runs;
   }
 
   double _effectiveFrameRate() {
