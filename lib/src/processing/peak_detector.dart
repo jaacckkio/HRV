@@ -18,6 +18,11 @@ const double kRefractoryFraction = 0.70;
 /// clears this threshold, the global maximum is used as fallback.
 const double kAutocorrPeakThreshold = 0.5;
 
+/// Hard physiological floor for emitted RR intervals (ms). Any interval
+/// at or below this is a detection artifact (two peaks on the same or
+/// adjacent samples), not data, and is never emitted. 300 ms ≈ 200 bpm.
+const double kMinRRIntervalMs = 300.0;
+
 /// Detects peaks in a PPG signal for RR interval calculation.
 /// Adapted from flutter_ppg (MIT License, shigindo.com)
 class PeakDetector {
@@ -87,19 +92,23 @@ class PeakDetector {
   }
 
   /// Converts peak indices to RR intervals in milliseconds.
+  /// Intervals at or below [kMinRRIntervalMs] are detection artifacts and
+  /// are never emitted.
   List<double> peaksToRRIntervals(List<int> peakIndices, double frameRate) {
     if (peakIndices.length < 2) return [];
 
     final rrIntervals = <double>[];
     for (int i = 1; i < peakIndices.length; i++) {
       final diffFrames = peakIndices[i] - peakIndices[i - 1];
-      final seconds = diffFrames / frameRate;
-      rrIntervals.add(seconds * 1000.0);
+      final ms = (diffFrames / frameRate) * 1000.0;
+      if (ms > kMinRRIntervalMs) rrIntervals.add(ms);
     }
     return rrIntervals;
   }
 
   /// Converts interpolated (fractional) peak indices to RR intervals in milliseconds.
+  /// Intervals at or below [kMinRRIntervalMs] are detection artifacts and
+  /// are never emitted.
   List<double> peaksToRRIntervalsInterpolated(
       List<double> interpolatedPeakIndices, double frameRate) {
     if (interpolatedPeakIndices.length < 2) return [];
@@ -108,8 +117,8 @@ class PeakDetector {
     for (int i = 1; i < interpolatedPeakIndices.length; i++) {
       final diffFrames =
           interpolatedPeakIndices[i] - interpolatedPeakIndices[i - 1];
-      final seconds = diffFrames / frameRate;
-      rrIntervals.add(seconds * 1000.0);
+      final ms = (diffFrames / frameRate) * 1000.0;
+      if (ms > kMinRRIntervalMs) rrIntervals.add(ms);
     }
     return rrIntervals;
   }
