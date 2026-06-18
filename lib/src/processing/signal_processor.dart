@@ -81,12 +81,74 @@ class SignalProcessor {
           meanB: sumB / count,
         );
       case ImageFormatGroup.yuv420:
-        // No easy access to separate RGB channels in YUV420.
-        // Return values that pass the finger check by default.
-        return (meanR: 200.0, meanG: 50.0, meanB: 50.0);
+        return _extractRGBMeansFromYUV420(image);
       default:
         return (meanR: 200.0, meanG: 50.0, meanB: 50.0);
     }
+  }
+
+  /// Extract mean R, G, B from a YUV420 CameraImage using plane means and
+  /// BT.601 conversion. Works for both planar (I420) and semi-planar
+  /// (NV12/NV21) layouts by respecting each plane's pixelStride and rowStride.
+  static ({double meanR, double meanG, double meanB}) _extractRGBMeansFromYUV420(
+      CameraImage image) {
+    final int width = image.width;
+    final int height = image.height;
+
+    // Y plane — full resolution, one byte per pixel
+    final yPlane = image.planes[0];
+    final yBytes = yPlane.bytes;
+    final int yRowStride = yPlane.bytesPerRow;
+    int ySum = 0;
+    for (int row = 0; row < height; row++) {
+      final int rowOffset = row * yRowStride;
+      for (int col = 0; col < width; col++) {
+        ySum += yBytes[rowOffset + col];
+      }
+    }
+    final double meanY = ySum / (width * height);
+
+    // U plane (Cb) — half resolution
+    final uPlane = image.planes[1];
+    final uBytes = uPlane.bytes;
+    final int uPixelStride = uPlane.bytesPerPixel ?? 1;
+    final int uRowStride = uPlane.bytesPerRow;
+    final int uvWidth = width ~/ 2;
+    final int uvHeight = height ~/ 2;
+    int uSum = 0;
+    int uCount = 0;
+    for (int row = 0; row < uvHeight; row++) {
+      final int rowOffset = row * uRowStride;
+      for (int col = 0; col < uvWidth; col++) {
+        uSum += uBytes[rowOffset + col * uPixelStride];
+        uCount++;
+      }
+    }
+    final double meanU = uCount > 0 ? uSum / uCount : 128.0;
+
+    // V plane (Cr) — half resolution
+    final vPlane = image.planes[2];
+    final vBytes = vPlane.bytes;
+    final int vPixelStride = vPlane.bytesPerPixel ?? 1;
+    final int vRowStride = vPlane.bytesPerRow;
+    int vSum = 0;
+    int vCount = 0;
+    for (int row = 0; row < uvHeight; row++) {
+      final int rowOffset = row * vRowStride;
+      for (int col = 0; col < uvWidth; col++) {
+        vSum += vBytes[rowOffset + col * vPixelStride];
+        vCount++;
+      }
+    }
+    final double meanV = vCount > 0 ? vSum / vCount : 128.0;
+
+    // BT.601 YUV→RGB on the channel means
+    final double r = (meanY + 1.402 * (meanV - 128)).clamp(0, 255).toDouble();
+    final double g =
+        (meanY - 0.344 * (meanU - 128) - 0.714 * (meanV - 128)).clamp(0, 255).toDouble();
+    final double b = (meanY + 1.772 * (meanU - 128)).clamp(0, 255).toDouble();
+
+    return (meanR: r, meanG: g, meanB: b);
   }
 
   /// Compute HSV Value (brightness) from RGB channel means.

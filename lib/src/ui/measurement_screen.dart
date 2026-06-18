@@ -3,6 +3,7 @@ import 'dart:io' show Platform;
 import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:camera/camera.dart';
+import 'package:permission_handler/permission_handler.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 import '../processing/ppg_service.dart';
 import '../processing/hrv_calculator.dart';
@@ -127,6 +128,18 @@ class _MeasurementScreenState extends State<MeasurementScreen>
 
   Future<void> _initializeCamera() async {
     try {
+      // Android requires a runtime CAMERA permission request before
+      // CameraController.initialize() — iOS handles it via Info.plist.
+      if (Platform.isAndroid) {
+        final status = await Permission.camera.request();
+        if (!status.isGranted) {
+          if (mounted) {
+            setState(() => _status = 'Camera permission denied');
+          }
+          return;
+        }
+      }
+
       final cameras = await availableCameras();
       if (cameras.isEmpty) {
         if (mounted) setState(() => _status = 'No cameras found.');
