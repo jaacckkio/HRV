@@ -91,8 +91,8 @@ class PolarH10Service {
   bool _intentionalDisconnect = false;
 
   // Dedup: the H10 HR Measurement characteristic delivers each beat in two
-  // consecutive notifications. Track last appended RR across packets.
-  int? _lastAppendedRrMs;
+  // consecutive notifications (entire multi-value packets repeat).
+  List<int>? _lastRrList;
 
   /// Start scanning for Polar devices. Auto-connects to the strongest one
   /// after collecting candidates for up to 5 s, or 15 s total timeout.
@@ -280,21 +280,26 @@ class PolarH10Service {
       offset += 2;
     }
 
-    // RR intervals (1/1024 second units), deduped across notifications.
-    // The H10 delivers each beat in two consecutive packets — skip any
-    // value exactly equal to the last appended RR.
+    // RR intervals (1/1024 second units).
     final rrMs = <int>[];
     if (rrPresent) {
       while (offset + 1 < data.length) {
         final raw = data[offset] | (data[offset + 1] << 8);
         // Convert from 1/1024 s to milliseconds
         final ms = (raw * 1000.0 / 1024.0).round();
-        if (ms != _lastAppendedRrMs) {
-          rrMs.add(ms);
-          _lastAppendedRrMs = ms;
-        }
+        rrMs.add(ms);
         offset += 2;
       }
+    }
+
+    // Packet-level dedup: the H10 delivers each notification twice.
+    // Two consecutive packets with identical multi-value RR lists is
+    // physiologically impossible, so drop the duplicate RR values
+    // (but keep the packet for hr + sessionMicros).
+    if (rrMs.isNotEmpty && _listEquals(rrMs, _lastRrList)) {
+      rrMs.clear();
+    } else if (rrMs.isNotEmpty) {
+      _lastRrList = List.of(rrMs);
     }
 
     final packet = PolarRRPacket(
@@ -337,7 +342,7 @@ class PolarH10Service {
     _packets.clear();
     _latestHR = 0;
     _hasReconnected = false;
-    _lastAppendedRrMs = null;
+    _lastRrList = null;
   }
 
   /// Full cleanup.
@@ -357,5 +362,13 @@ class PolarH10Service {
   void _setError(String msg) {
     _errorMessage = msg;
     _setState(PolarConnectionState.error);
+  }
+
+  static bool _listEquals(List<int> a, List<int>? b) {
+    if (b == null || a.length != b.length) return false;
+    for (int i = 0; i < a.length; i++) {
+      if (a[i] != b[i]) return false;
+    }
+    return true;
   }
 }
