@@ -467,6 +467,22 @@ class PeakDetector {
   /// RMSSD 56 vs 54, SDNN 66 vs 61.
   static List<int> findPeaksAmplitudePriority(
       List<double> rawSegment, double fps) {
+    return _findPeaksAmplitudePriorityCore(rawSegment, fps, null);
+  }
+
+  /// Same algorithm as [findPeaksAmplitudePriority] but also populates
+  /// [diag] with every intermediate stage. Called only on the diagnostics
+  /// path — the core algorithm is shared so production and diagnostics
+  /// cannot drift.
+  static List<int> findPeaksAmplitudePriorityWithDiagnostics(
+      List<double> rawSegment, double fps, SegmentDiagnostics diag) {
+    return _findPeaksAmplitudePriorityCore(rawSegment, fps, diag);
+  }
+
+  /// Shared core for the amplitude-priority detector. When [diag] is
+  /// non-null, intermediate arrays are captured; when null, no overhead.
+  static List<int> _findPeaksAmplitudePriorityCore(
+      List<double> rawSegment, double fps, SegmentDiagnostics? diag) {
     if (rawSegment.length < 3 || fps <= 0) return [];
 
     // 1. Zero-phase bandpass at the narrow detection band
@@ -490,6 +506,13 @@ class PeakDetector {
       sig[i] = (sig[i] - mean) / std;
     }
 
+    // Capture normalised signal (rounded to 3 dp for size)
+    if (diag != null) {
+      diag.filteredNormalized = [
+        for (final v in sig) double.parse(v.toStringAsFixed(3))
+      ];
+    }
+
     // 3. Candidate maxima
     final candidates = <int>[];
     for (int i = 1; i < sig.length - 1; i++) {
@@ -497,6 +520,7 @@ class PeakDetector {
         candidates.add(i);
       }
     }
+    if (diag != null) diag.candidateIndices = List<int>.from(candidates);
     if (candidates.length < 3) return [];
 
     // 4. Amplitude gate: keep candidates above 0.5 × 40th percentile
@@ -506,10 +530,13 @@ class PeakDetector {
     final p40 = sortedAmps[p40idx];
     final ampThresh = 0.5 * p40;
 
+    if (diag != null) diag.gateThreshold = ampThresh;
+
     final kept = <int>[];
     for (final c in candidates) {
       if (sig[c] > ampThresh) kept.add(c);
     }
+    if (diag != null) diag.keptCandidateIndices = List<int>.from(kept);
     if (kept.length < 2) return [];
 
     // 5. Robust period estimate
@@ -538,6 +565,11 @@ class PeakDetector {
     // 6. Refractory frames
     final refr = (0.55 * period / 1000.0 * fps).round();
 
+    if (diag != null) {
+      diag.robustPeriodMs = period;
+      diag.refractoryFrames = refr;
+    }
+
     // 7. Amplitude-priority suppression
     // Sort kept candidates by descending amplitude
     final sortedByAmp = List<int>.from(kept)
@@ -565,6 +597,8 @@ class PeakDetector {
 
     // 8. Sort accepted by index
     accepted.sort();
+
+    if (diag != null) diag.acceptedPeakIndices = List<int>.from(accepted);
 
     if (kDebugMode) {
       debugPrint(
@@ -604,4 +638,30 @@ class ROIDetectionResult {
     required this.peakIndices,
     required this.selectedWindowSec,
   });
+}
+
+/// Mutable diagnostics bag populated by [findPeaksAmplitudePriorityWithDiagnostics].
+/// One instance per detected segment.
+class SegmentDiagnostics {
+  int start = 0;
+  int end = 0;
+  List<double> filteredNormalized = [];
+  List<int> candidateIndices = [];
+  double gateThreshold = 0;
+  List<int> keptCandidateIndices = [];
+  double robustPeriodMs = 0;
+  int refractoryFrames = 0;
+  List<int> acceptedPeakIndices = [];
+
+  Map<String, dynamic> toJson() => {
+        'start': start,
+        'end': end,
+        'filteredNormalized': filteredNormalized,
+        'candidateIndices': candidateIndices,
+        'gateThreshold': gateThreshold,
+        'keptCandidateIndices': keptCandidateIndices,
+        'robustPeriodMs': robustPeriodMs,
+        'refractoryFrames': refractoryFrames,
+        'acceptedPeakIndices': acceptedPeakIndices,
+      };
 }

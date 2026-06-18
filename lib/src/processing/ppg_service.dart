@@ -27,6 +27,7 @@ class PPGService {
   final List<double> _fullFilteredSignal = [];
   final List<double> _fullRawIntensity = [];
   final List<bool> _fullFingerPresent = [];
+  final List<int> _fullFrameMicros = [];
   static const PeakDetector _peakDetector = PeakDetector();
   final Stopwatch _frameStopwatch = Stopwatch();
   bool _buffersResized = false;
@@ -70,6 +71,7 @@ class PPGService {
     _fullFilteredSignal.clear();
     _fullRawIntensity.clear();
     _fullFingerPresent.clear();
+    _fullFrameMicros.clear();
     _frameRateDetector.reset();
     _frameStopwatch.stop();
     _lastReportedPeakCount = 0;
@@ -84,6 +86,7 @@ class PPGService {
     _fullFilteredSignal.clear();
     _fullRawIntensity.clear();
     _fullFingerPresent.clear();
+    _fullFrameMicros.clear();
     _frameRateDetector.reset();
     _frameStopwatch.stop();
     _buffersResized = false;
@@ -112,6 +115,7 @@ class PPGService {
     _fullFilteredSignal.clear();
     _fullRawIntensity.clear();
     _fullFingerPresent.clear();
+    _fullFrameMicros.clear();
     _lastReportedPeakCount = 0;
     _butterworthFilter?.reset();
   }
@@ -157,6 +161,7 @@ class PPGService {
   /// Follows the exact same pipeline as processSingleFrame.
   PPGSignal processReplaySample(
       int timestampMicros, double meanR, double meanG, double meanB) {
+    _lastFrameMicros = timestampMicros;
     _frameRateDetector.recordFrameMicros(timestampMicros);
     final fps = _effectiveFrameRate();
     _resizeBuffersIfNeeded(fps);
@@ -223,6 +228,7 @@ class PPGService {
     _fullFilteredSignal.add(filteredPoint);
     _fullRawIntensity.add(intensity);
     _fullFingerPresent.add(fingerDetected);
+    _fullFrameMicros.add(_lastFrameMicros);
 
     // If quality is poor or FPS not stable, return early
     if (quality == SignalQuality.poor || !_frameRateDetector.isStable) {
@@ -344,6 +350,122 @@ class PPGService {
       filteredSignal: List<double>.from(_fullFilteredSignal),
       peakIndices: allPeakIndices,
       interpolatedPeaks: allInterpolatedPeaks,
+    );
+  }
+
+  /// Same as [computeFinalRRIntervals] but uses the diagnostics variant of
+  /// the detector, capturing every intermediate stage. The algorithm is the
+  /// same shared core — peaks and RR will be identical.
+  ({
+    List<double> rrIntervals,
+    List<int> peakIndices,
+    Map<String, dynamic> diagnostics,
+  }) computeFinalRRIntervalsWithDiagnostics({
+    required int clearBufferAtFrame,
+  }) {
+    final fps = _effectiveFrameRate();
+    if (_fullFilteredSignal.length < 3 || fps <= 0) {
+      return (
+        rrIntervals: <double>[],
+        peakIndices: <int>[],
+        diagnostics: <String, dynamic>{},
+      );
+    }
+
+    final runs = _findFingerPresentRuns(
+        _fullFingerPresent, 0, _fullRawIntensity.length, fps);
+
+    // Build segment info for ALL runs (including skipped ones)
+    final allSegments = <Map<String, dynamic>>[];
+    final minRunLen = (1.5 * fps).round();
+    {
+      // Walk the full mask to find all runs, including short ones
+      int runStart = -1;
+      for (int i = 0; i < _fullRawIntensity.length; i++) {
+        final present = i < _fullFingerPresent.length ? _fullFingerPresent[i] : true;
+        if (present) {
+          if (runStart < 0) runStart = i;
+        } else {
+          if (runStart >= 0) {
+            final len = i - runStart;
+            allSegments.add({
+              'start': runStart,
+              'end': runStart + len,
+              'usedForDetection': len >= minRunLen,
+            });
+            runStart = -1;
+          }
+        }
+      }
+      if (runStart >= 0) {
+        final len = _fullRawIntensity.length - runStart;
+        allSegments.add({
+          'start': runStart,
+          'end': runStart + len,
+          'usedForDetection': len >= minRunLen,
+        });
+      }
+    }
+
+    final allRR = <double>[];
+    final allPeakIndices = <int>[];
+    final perSegment = <Map<String, dynamic>>[];
+
+    for (final (start, length) in runs) {
+      final segment = _fullRawIntensity.sublist(start, start + length);
+      final diag = SegmentDiagnostics()
+        ..start = start
+        ..end = start + length;
+      final peaks = PeakDetector.findPeaksAmplitudePriorityWithDiagnostics(
+          segment, fps, diag);
+
+      for (final p in peaks) {
+        allPeakIndices.add(p + start);
+      }
+
+      final segRR = _peakDetector.peaksToRRIntervals(peaks, fps);
+      allRR.addAll(segRR);
+      perSegment.add(diag.toJson());
+    }
+
+    // cameraPeakSessionMicros — real per-frame timestamp at each peak index
+    final cameraPeakSessionMicros = <int>[];
+    for (final idx in allPeakIndices) {
+      if (idx < _fullFrameMicros.length) {
+        cameraPeakSessionMicros.add(_fullFrameMicros[idx]);
+      }
+    }
+
+    final diagnostics = <String, dynamic>{
+      'meta': {
+        'fps': fps,
+        'sampleCount': _fullRawIntensity.length,
+        'clearBufferAtFrame': clearBufferAtFrame,
+        'detectionLowHz': kDetectionLowHz,
+        'detectionHighHz': kDetectionHighHz,
+        'minRRIntervalMs': kMinRRIntervalMs,
+        'amplitudeGatePercentile': 40,
+        'amplitudeGateFraction': 0.5,
+        'periodMinSpacingMs': 250,
+        'periodUpperFraction': 0.7,
+        'refractoryFraction': 0.55,
+      },
+      'fullRawIntensity': List<double>.from(_fullRawIntensity),
+      'fullFingerPresent': List<bool>.from(_fullFingerPresent),
+      'segments': allSegments,
+      'perSegment': perSegment,
+      'cameraPeakIndicesFull': allPeakIndices,
+      'cameraPeakSessionMicros': cameraPeakSessionMicros,
+      'detectedRRraw': allRR,
+      // detectedRRfinal, artifactRejectedCount, resultsScreenRRfinal,
+      // resultsScreenBeatCount, diagnosticsMatchResultsScreen — filled by caller
+      // after running the artifact filter
+    };
+
+    return (
+      rrIntervals: allRR,
+      peakIndices: allPeakIndices,
+      diagnostics: diagnostics,
     );
   }
 

@@ -16,23 +16,31 @@ class PolarRRPacket {
   final int sessionMicros; // timestamp on the shared PPGService clock
   final int hr; // instantaneous HR from the strap
   final List<int> rrIntervalsMs; // 1/1024 s values converted to ms
+  final List<int> rrRaw1024; // original RR values in 1/1024-second units
+  final String rawHex; // raw HR Measurement characteristic bytes, hex-encoded
 
   const PolarRRPacket({
     required this.sessionMicros,
     required this.hr,
     required this.rrIntervalsMs,
+    this.rrRaw1024 = const [],
+    this.rawHex = '',
   });
 
   Map<String, dynamic> toJson() => {
         'sessionMicros': sessionMicros,
         'hr': hr,
         'rrIntervalsMs': rrIntervalsMs,
+        'rrRaw1024': rrRaw1024,
+        'rawHex': rawHex,
       };
 
   factory PolarRRPacket.fromJson(Map<String, dynamic> j) => PolarRRPacket(
         sessionMicros: j['sessionMicros'] as int,
         hr: j['hr'] as int,
         rrIntervalsMs: (j['rrIntervalsMs'] as List).cast<int>(),
+        rrRaw1024: (j['rrRaw1024'] as List?)?.cast<int>() ?? const [],
+        rawHex: j['rawHex'] as String? ?? '',
       );
 }
 
@@ -256,6 +264,9 @@ class PolarH10Service {
     if (value.isEmpty) return;
 
     final data = Uint8List.fromList(value);
+    // Capture raw hex before any parsing
+    final rawHex = data.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
+
     final flags = data[0];
     final hrIs16Bit = (flags & 0x01) != 0;
     final rrPresent = (flags & 0x10) != 0;
@@ -282,9 +293,11 @@ class PolarH10Service {
 
     // RR intervals (1/1024 second units).
     final rrMs = <int>[];
+    final rrRaw1024 = <int>[];
     if (rrPresent) {
       while (offset + 1 < data.length) {
         final raw = data[offset] | (data[offset + 1] << 8);
+        rrRaw1024.add(raw);
         // Convert from 1/1024 s to milliseconds
         final ms = (raw * 1000.0 / 1024.0).round();
         rrMs.add(ms);
@@ -306,6 +319,8 @@ class PolarH10Service {
       sessionMicros: nowMicros(),
       hr: hr,
       rrIntervalsMs: rrMs,
+      rrRaw1024: rrRaw1024,
+      rawHex: rawHex,
     );
     _packets.add(packet);
     onRRPacket?.call(packet);

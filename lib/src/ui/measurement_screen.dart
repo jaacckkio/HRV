@@ -7,6 +7,7 @@ import 'package:permission_handler/permission_handler.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 import '../processing/ppg_service.dart';
 import '../processing/hrv_calculator.dart';
+import '../processing/rr_artifact_filter.dart';
 import '../models/ppg_signal.dart';
 import '../camera/camera_control.dart';
 import '../recording/ppg_recording.dart';
@@ -483,6 +484,40 @@ class _MeasurementScreenState extends State<MeasurementScreen>
         ? _polarService!.packets.map((p) => p.toJson()).toList()
         : null;
 
+    // Diagnostics — full pipeline snapshot, gated by kShowDevTools
+    Map<String, dynamic>? diagnosticsMap;
+    if (kShowDevTools && _ppgService != null) {
+      final diagResult = _ppgService!.computeFinalRRIntervalsWithDiagnostics(
+        clearBufferAtFrame: _recordClearAtFrame,
+      );
+
+      // Run artifact filter on the diagnostics RR to get detectedRRfinal
+      final artifactResult = RRArtifactFilter.filter(diagResult.rrIntervals);
+      final detectedRRfinal = artifactResult.intervals;
+
+      // The production path's RR (what the results screen displayed)
+      final resultsScreenRR = finalResult.rrIntervals;
+
+      // Check match: same shared core → should be identical
+      bool diagMatch = resultsScreenRR.length == diagResult.rrIntervals.length;
+      if (diagMatch) {
+        for (int i = 0; i < resultsScreenRR.length; i++) {
+          if (resultsScreenRR[i] != diagResult.rrIntervals[i]) {
+            diagMatch = false;
+            break;
+          }
+        }
+      }
+
+      diagnosticsMap = diagResult.diagnostics;
+      diagnosticsMap['detectedRRfinal'] = detectedRRfinal;
+      diagnosticsMap['artifactRejectedCount'] =
+          diagResult.rrIntervals.length - detectedRRfinal.length;
+      diagnosticsMap['resultsScreenRRfinal'] = resultsScreenRR;
+      diagnosticsMap['resultsScreenBeatCount'] = finalResult.peakIndices.length;
+      diagnosticsMap['diagnosticsMatchResultsScreen'] = diagMatch;
+    }
+
     final recording = PPGRecording(
       startWallClockUtc:
           _recordStartWallClock ?? DateTime.now().toUtc().toIso8601String(),
@@ -493,6 +528,7 @@ class _MeasurementScreenState extends State<MeasurementScreen>
       finalRRIntervals: beats,
       polarConnected: _polarWasConnected,
       polarPackets: polarPkts,
+      diagnostics: diagnosticsMap,
     );
 
     recording.save().then((_) {

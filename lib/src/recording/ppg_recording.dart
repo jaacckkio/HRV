@@ -61,6 +61,7 @@ class PPGRecording {
   final List<RRBeat> finalRRIntervals;
   final bool polarConnected; // whether Polar was connected during session
   final List<Map<String, dynamic>>? polarPackets; // raw PolarRRPacket JSON
+  final Map<String, dynamic>? diagnostics; // debug-only detector diagnostics
 
   const PPGRecording({
     required this.startWallClockUtc,
@@ -71,6 +72,7 @@ class PPGRecording {
     required this.finalRRIntervals,
     this.polarConnected = false,
     this.polarPackets,
+    this.diagnostics,
   });
 
   Map<String, dynamic> toJson() => {
@@ -83,6 +85,7 @@ class PPGRecording {
         'finalRRIntervals': finalRRIntervals.map((b) => b.toJson()).toList(),
         'polarConnected': polarConnected,
         if (polarPackets != null) 'polarPackets': polarPackets,
+        if (diagnostics != null) 'diagnostics': diagnostics,
       };
 
   factory PPGRecording.fromJson(Map<String, dynamic> json) => PPGRecording(
