@@ -90,6 +90,10 @@ class PolarH10Service {
   bool _hasReconnected = false;
   bool _intentionalDisconnect = false;
 
+  // Dedup: the H10 HR Measurement characteristic delivers each beat in two
+  // consecutive notifications. Track last appended RR across packets.
+  int? _lastAppendedRrMs;
+
   /// Start scanning for Polar devices. Auto-connects to the strongest one
   /// after collecting candidates for up to 5 s, or 15 s total timeout.
   Future<void> startScan() async {
@@ -276,14 +280,19 @@ class PolarH10Service {
       offset += 2;
     }
 
-    // RR intervals (1/1024 second units)
+    // RR intervals (1/1024 second units), deduped across notifications.
+    // The H10 delivers each beat in two consecutive packets — skip any
+    // value exactly equal to the last appended RR.
     final rrMs = <int>[];
     if (rrPresent) {
       while (offset + 1 < data.length) {
         final raw = data[offset] | (data[offset + 1] << 8);
         // Convert from 1/1024 s to milliseconds
         final ms = (raw * 1000.0 / 1024.0).round();
-        rrMs.add(ms);
+        if (ms != _lastAppendedRrMs) {
+          rrMs.add(ms);
+          _lastAppendedRrMs = ms;
+        }
         offset += 2;
       }
     }
@@ -328,6 +337,7 @@ class PolarH10Service {
     _packets.clear();
     _latestHR = 0;
     _hasReconnected = false;
+    _lastAppendedRrMs = null;
   }
 
   /// Full cleanup.
