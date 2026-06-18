@@ -40,6 +40,10 @@ class CameraControlPlugin {
             result(unlockCameraSettings())
         case "setHighFrameRate":
             result(setHighFrameRate())
+        case "setFrameRate":
+            let args = call.arguments as? [String: Any]
+            let fps = args?["fps"] as? Int ?? 120
+            result(setFrameRate(fps: fps))
         default:
             result(FlutterMethodNotImplemented)
         }
@@ -211,6 +215,85 @@ class CameraControlPlugin {
             NSLog("CameraControlPlugin: set format \(dims.width)x\(dims.height) @ \(targetFps) fps")
 
             return ["requestedFps": targetFps, "error": NSNull()]
+        } catch {
+            return [
+                "requestedFps": 0.0,
+                "error": "lockForConfiguration failed: \(error.localizedDescription)"
+            ]
+        }
+    }
+
+    /// Request a specific frame rate (30, 60, or 120). Among formats that
+    /// support the requested rate, picks the lowest resolution to minimise
+    /// per-frame cost. Falls back to the highest supported rate ≤ requested
+    /// if the exact rate is unavailable.
+    private func setFrameRate(fps: Int) -> [String: Any] {
+        guard let device = AVCaptureDevice.default(
+            .builtInWideAngleCamera, for: .video, position: .back
+        ) else {
+            return ["requestedFps": 0.0, "error": "Could not acquire rear camera device"]
+        }
+
+        let targetFps = Float64(fps)
+
+        // Collect formats that support the requested fps, pick lowest resolution
+        var bestFormat: AVCaptureDevice.Format? = nil
+        var bestPixels: Int = Int.max
+
+        for format in device.formats {
+            let mediaType = CMFormatDescriptionGetMediaType(format.formatDescription)
+            guard mediaType == kCMMediaType_Video else { continue }
+
+            for range in format.videoSupportedFrameRateRanges {
+                if range.minFrameRate <= targetFps && range.maxFrameRate >= targetFps {
+                    let dims = CMVideoFormatDescriptionGetDimensions(format.formatDescription)
+                    let pixels = Int(dims.width) * Int(dims.height)
+                    if pixels < bestPixels {
+                        bestPixels = pixels
+                        bestFormat = format
+                    }
+                    break
+                }
+            }
+        }
+
+        // Fallback: if exact fps not found, find highest supported rate ≤ requested
+        var actualFps = targetFps
+        if bestFormat == nil {
+            var fallbackMaxFps: Float64 = 0
+            for format in device.formats {
+                let mediaType = CMFormatDescriptionGetMediaType(format.formatDescription)
+                guard mediaType == kCMMediaType_Video else { continue }
+
+                for range in format.videoSupportedFrameRateRanges {
+                    let candidateFps = min(range.maxFrameRate, targetFps)
+                    if candidateFps > fallbackMaxFps {
+                        fallbackMaxFps = candidateFps
+                        bestFormat = format
+                    }
+                }
+            }
+            actualFps = fallbackMaxFps
+            if bestFormat == nil {
+                return ["requestedFps": 0.0, "error": "No suitable format found for \(fps) fps"]
+            }
+        }
+
+        guard let chosenFormat = bestFormat else {
+            return ["requestedFps": 0.0, "error": "No suitable format found"]
+        }
+
+        do {
+            try device.lockForConfiguration()
+            device.activeFormat = chosenFormat
+            device.activeVideoMinFrameDuration = CMTimeMake(value: 1, timescale: Int32(actualFps))
+            device.activeVideoMaxFrameDuration = CMTimeMake(value: 1, timescale: Int32(actualFps))
+            device.unlockForConfiguration()
+
+            let dims = CMVideoFormatDescriptionGetDimensions(chosenFormat.formatDescription)
+            NSLog("CameraControlPlugin: setFrameRate \(dims.width)x\(dims.height) @ \(actualFps) fps (requested \(fps))")
+
+            return ["requestedFps": actualFps, "error": NSNull()]
         } catch {
             return [
                 "requestedFps": 0.0,

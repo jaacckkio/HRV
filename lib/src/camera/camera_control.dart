@@ -63,6 +63,26 @@ class CameraControl {
     }
   }
 
+  /// Request a specific frame rate (30, 60, or 120).
+  /// Returns the FPS that was actually set on the device, or 0 on failure.
+  static Future<double> setFrameRate(int fps) async {
+    try {
+      final result = await _channel.invokeMapMethod<String, dynamic>(
+          'setFrameRate', {'fps': fps});
+      if (result == null) return 0;
+      final error = result['error'];
+      if (error != null && error is String) {
+        // ignore: avoid_print
+        print('setFrameRate error: $error');
+      }
+      return (result['requestedFps'] as num?)?.toDouble() ?? 0;
+    } catch (e) {
+      // ignore: avoid_print
+      print('setFrameRate exception: $e');
+      return 0;
+    }
+  }
+
   /// Unlock camera settings back to continuous auto modes.
   static Future<void> unlockCameraSettings() async {
     try {

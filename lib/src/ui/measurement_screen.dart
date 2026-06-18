@@ -116,6 +116,9 @@ class _MeasurementScreenState extends State<MeasurementScreen>
   bool _continuousMode = false;
   int _elapsedSeconds = 0;
 
+  // DEV TOOLING — switchable camera FPS (chosen while idle, applied at Start)
+  int _selectedFps = 120;
+
   @override
   void initState() {
     super.initState();
@@ -221,10 +224,14 @@ class _MeasurementScreenState extends State<MeasurementScreen>
 
     WakelockPlus.enable();
 
-    // Request highest supported frame rate via native plugin (diagnostic).
+    // Request frame rate via native plugin.
     // Must be called after controller.initialize() sets up the AVCaptureSession
     // but before startImageStream so the format is active when frames arrive.
-    _requestedFps = await CameraControl.setHighFrameRate();
+    if (kShowDevTools) {
+      _requestedFps = await CameraControl.setFrameRate(_selectedFps);
+    } else {
+      _requestedFps = await CameraControl.setHighFrameRate();
+    }
     debugPrint('Requested FPS: $_requestedFps');
 
     try {
@@ -806,6 +813,8 @@ class _MeasurementScreenState extends State<MeasurementScreen>
                     _buildDevToolbar(),
                     const SizedBox(height: 6),
                     _buildPolarStrip(),
+                    const SizedBox(height: 6),
+                    _buildFpsPicker(),
                   ],
                   const SizedBox(height: 20),
                   _buildPulseWaveformCard(),
@@ -1389,6 +1398,68 @@ class _MeasurementScreenState extends State<MeasurementScreen>
                 color: textColor,
               ),
             ),
+        ],
+      ),
+    );
+  }
+
+  // DEV TOOLING — camera FPS picker (30 / 60 / 120)
+  Widget _buildFpsPicker() {
+    const fpsOptions = [30, 60, 120];
+    final enabled = !_isScanning;
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+      decoration: BoxDecoration(
+        color: const Color(0xFFFFF8E1),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: const Color(0xFFFFCC02)),
+      ),
+      child: Row(
+        children: [
+          const Text('FPS',
+              style: TextStyle(
+                  fontSize: 10,
+                  fontWeight: FontWeight.bold,
+                  color: Color(0xFF6D4C00))),
+          const SizedBox(width: 8),
+          for (final fps in fpsOptions) ...[
+            GestureDetector(
+              onTap: enabled
+                  ? () => setState(() => _selectedFps = fps)
+                  : null,
+              child: Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                decoration: BoxDecoration(
+                  color: _selectedFps == fps
+                      ? (enabled ? _teal : Colors.grey.shade400)
+                      : Colors.transparent,
+                  borderRadius: BorderRadius.circular(6),
+                  border: _selectedFps == fps
+                      ? null
+                      : Border.all(
+                          color: enabled
+                              ? const Color(0xFF6D4C00).withOpacity(0.3)
+                              : Colors.grey.shade300,
+                        ),
+                ),
+                child: Text(
+                  '$fps',
+                  style: TextStyle(
+                    fontSize: 11,
+                    fontWeight: FontWeight.bold,
+                    color: _selectedFps == fps
+                        ? Colors.white
+                        : (enabled
+                            ? const Color(0xFF6D4C00)
+                            : Colors.grey.shade400),
+                  ),
+                ),
+              ),
+            ),
+            if (fps != fpsOptions.last) const SizedBox(width: 6),
+          ],
         ],
       ),
     );
