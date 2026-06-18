@@ -42,6 +42,15 @@ class ButterworthBandpassFilter {
     _lpCoeffs = _computeLowPass(sampleRate, kBandpassHighHz);
   }
 
+  ButterworthBandpassFilter.custom({
+    required double sampleRate,
+    required double lowHz,
+    required double highHz,
+  }) {
+    _hpCoeffs = _computeHighPass(sampleRate, lowHz);
+    _lpCoeffs = _computeLowPass(sampleRate, highHz);
+  }
+
   static _BiquadCoeffs _computeHighPass(double sampleRate, double cutoff) {
     final omega = 2.0 * math.pi * cutoff / sampleRate;
     final sinOmega = math.sin(omega);
@@ -92,5 +101,31 @@ class ButterworthBandpassFilter {
   void reset() {
     _hpState.reset();
     _lpState.reset();
+  }
+
+  /// Zero-phase (forward-backward) bandpass filter over a complete signal.
+  /// Creates a temporary filter with the given cutoffs, runs it forward,
+  /// resets state, runs backward, and reverses the result. This eliminates
+  /// phase distortion, giving symmetric peaks suitable for accurate timing.
+  static List<double> filtfilt(
+      List<double> signal, double sampleRate, double lowHz, double highHz) {
+    if (signal.isEmpty) return [];
+    final f = ButterworthBandpassFilter.custom(
+        sampleRate: sampleRate, lowHz: lowHz, highHz: highHz);
+
+    // Forward pass
+    final forward = List<double>.filled(signal.length, 0.0);
+    for (int i = 0; i < signal.length; i++) {
+      forward[i] = f.process(signal[i]);
+    }
+
+    // Reset state, backward pass
+    f.reset();
+    final result = List<double>.filled(signal.length, 0.0);
+    for (int i = signal.length - 1; i >= 0; i--) {
+      result[i] = f.process(forward[i]);
+    }
+
+    return result;
   }
 }

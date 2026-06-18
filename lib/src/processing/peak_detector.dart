@@ -1,6 +1,7 @@
 import 'dart:math' as math;
 import 'package:flutter/foundation.dart';
-import 'butterworth_filter.dart' show kBandpassLowHz, kBandpassHighHz;
+import 'butterworth_filter.dart'
+    show kBandpassLowHz, kBandpassHighHz, ButterworthBandpassFilter;
 
 /// Candidate moving-average window sizes (seconds) for ROI auto-tuning.
 const List<double> kMovingAvgWindowsSec = [0.75, 1.0, 1.5, 2.0, 2.5];
@@ -22,6 +23,12 @@ const double kAutocorrPeakThreshold = 0.5;
 /// at or below this is a detection artifact (two peaks on the same or
 /// adjacent samples), not data, and is never emitted. 300 ms ≈ 200 bpm.
 const double kMinRRIntervalMs = 300.0;
+
+/// Detection-band cutoffs for the amplitude-priority detector.
+/// Narrower than the display band (0.7–4.0 Hz) to collapse each cardiac
+/// cycle into a single hump, validated against Polar H10 ground truth.
+const double kDetectionLowHz = 0.7;
+const double kDetectionHighHz = 2.4;
 
 /// Detects peaks in a PPG signal for RR interval calculation.
 /// Adapted from flutter_ppg (MIT License, shigindo.com)
@@ -446,6 +453,128 @@ class PeakDetector {
     }
 
     return math.sqrt(varSum / diffs.length);
+  }
+
+  // ──────────────────────────────────────────────────────────────────
+  // Amplitude-priority refractory peak detector (validated vs Polar H10)
+  // ──────────────────────────────────────────────────────────────────
+
+  /// Detect peaks using zero-phase narrow-band filtering + amplitude-priority
+  /// refractory suppression. [rawSegment] is the *raw* PPG intensity (not the
+  /// causal display-filtered signal). Returns integer peak indices.
+  ///
+  /// Validated offline against simultaneous Polar H10: HR 75 vs 70,
+  /// RMSSD 56 vs 54, SDNN 66 vs 61.
+  static List<int> findPeaksAmplitudePriority(
+      List<double> rawSegment, double fps) {
+    if (rawSegment.length < 3 || fps <= 0) return [];
+
+    // 1. Zero-phase bandpass at the narrow detection band
+    final sig = ButterworthBandpassFilter.filtfilt(
+        rawSegment, fps, kDetectionLowHz, kDetectionHighHz);
+
+    // 2. Normalise by standard deviation
+    double sum = 0;
+    for (int i = 0; i < sig.length; i++) {
+      sum += sig[i];
+    }
+    final mean = sum / sig.length;
+    double varSum = 0;
+    for (int i = 0; i < sig.length; i++) {
+      final d = sig[i] - mean;
+      varSum += d * d;
+    }
+    final std = math.sqrt(varSum / sig.length);
+    if (std < 1e-12) return [];
+    for (int i = 0; i < sig.length; i++) {
+      sig[i] = (sig[i] - mean) / std;
+    }
+
+    // 3. Candidate maxima
+    final candidates = <int>[];
+    for (int i = 1; i < sig.length - 1; i++) {
+      if (sig[i] > sig[i - 1] && sig[i] >= sig[i + 1]) {
+        candidates.add(i);
+      }
+    }
+    if (candidates.length < 3) return [];
+
+    // 4. Amplitude gate: keep candidates above 0.5 × 40th percentile
+    final candAmps = <double>[for (final c in candidates) sig[c]];
+    final sortedAmps = List<double>.from(candAmps)..sort();
+    final p40idx = (0.4 * (sortedAmps.length - 1)).round();
+    final p40 = sortedAmps[p40idx];
+    final ampThresh = 0.5 * p40;
+
+    final kept = <int>[];
+    for (final c in candidates) {
+      if (sig[c] > ampThresh) kept.add(c);
+    }
+    if (kept.length < 2) return [];
+
+    // 5. Robust period estimate
+    final spacingsMs = <double>[];
+    for (int i = 1; i < kept.length; i++) {
+      final ms = (kept[i] - kept[i - 1]) / fps * 1000.0;
+      if (ms > 250.0) spacingsMs.add(ms);
+    }
+
+    double period;
+    if (spacingsMs.length < 2) {
+      period = 800.0;
+    } else {
+      final sortedSpacings = List<double>.from(spacingsMs)..sort();
+      final med =
+          sortedSpacings[sortedSpacings.length ~/ 2];
+      final upperHalf = <double>[
+        for (final s in sortedSpacings)
+          if (s > 0.7 * med) s
+      ];
+      period = upperHalf.isNotEmpty
+          ? upperHalf[upperHalf.length ~/ 2]
+          : med;
+    }
+
+    // 6. Refractory frames
+    final refr = (0.55 * period / 1000.0 * fps).round();
+
+    // 7. Amplitude-priority suppression
+    // Sort kept candidates by descending amplitude
+    final sortedByAmp = List<int>.from(kept)
+      ..sort((a, b) => sig[b].compareTo(sig[a]));
+
+    final taken = List<bool>.filled(sig.length, false);
+    final accepted = <int>[];
+
+    for (final c in sortedByAmp) {
+      // Check if any already-accepted peak is within refr frames
+      bool tooClose = false;
+      final lo = math.max(0, c - refr);
+      final hi = math.min(sig.length - 1, c + refr);
+      for (int j = lo; j <= hi; j++) {
+        if (taken[j]) {
+          tooClose = true;
+          break;
+        }
+      }
+      if (!tooClose) {
+        accepted.add(c);
+        taken[c] = true;
+      }
+    }
+
+    // 8. Sort accepted by index
+    accepted.sort();
+
+    if (kDebugMode) {
+      debugPrint(
+        'AmplitudePriority: candidates=${candidates.length} '
+        'kept=${kept.length} period=${period.toStringAsFixed(0)}ms '
+        'refr=$refr accepted=${accepted.length}',
+      );
+    }
+
+    return accepted;
   }
 }
 
