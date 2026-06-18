@@ -100,8 +100,22 @@ class PolarH10Service {
     _errorMessage = null;
     _setState(PolarConnectionState.scanning);
 
-    // Check adapter state
-    final adapterState = FlutterBluePlus.adapterStateNow;
+    // Wait for a definitive adapter state (this also triggers the iOS
+    // Bluetooth permission prompt on first use). adapterStateNow is often
+    // `unknown` on a fresh launch before CoreBluetooth has reported.
+    BluetoothAdapterState adapterState;
+    try {
+      adapterState = await FlutterBluePlus.adapterState
+          .firstWhere((s) => s != BluetoothAdapterState.unknown)
+          .timeout(const Duration(seconds: 6));
+    } catch (_) {
+      _setError('Bluetooth not responding — check it is on and permission granted in Settings');
+      return;
+    }
+    if (adapterState == BluetoothAdapterState.unauthorized) {
+      _setError('Bluetooth permission denied — enable it in Settings > Vagal HRV Camera');
+      return;
+    }
     if (adapterState != BluetoothAdapterState.on) {
       _setError('Bluetooth is off — turn it on in Settings');
       return;
