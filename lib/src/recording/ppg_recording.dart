@@ -59,6 +59,8 @@ class PPGRecording {
   final int clearBufferAtFrame; // frame index where clearSignalBuffers was called
   final List<PPGFrameSample> samples;
   final List<RRBeat> finalRRIntervals;
+  final bool polarConnected; // whether Polar was connected during session
+  final List<Map<String, dynamic>>? polarPackets; // raw PolarRRPacket JSON
 
   const PPGRecording({
     required this.startWallClockUtc,
@@ -67,6 +69,8 @@ class PPGRecording {
     required this.clearBufferAtFrame,
     required this.samples,
     required this.finalRRIntervals,
+    this.polarConnected = false,
+    this.polarPackets,
   });
 
   Map<String, dynamic> toJson() => {
@@ -77,6 +81,8 @@ class PPGRecording {
         'sampleCount': samples.length,
         'samples': samples.map((s) => s.toJson()).toList(),
         'finalRRIntervals': finalRRIntervals.map((b) => b.toJson()).toList(),
+        'polarConnected': polarConnected,
+        if (polarPackets != null) 'polarPackets': polarPackets,
       };
 
   factory PPGRecording.fromJson(Map<String, dynamic> json) => PPGRecording(
@@ -90,6 +96,10 @@ class PPGRecording {
         finalRRIntervals: (json['finalRRIntervals'] as List)
             .map((e) => RRBeat.fromJson(e as Map<String, dynamic>))
             .toList(),
+        polarConnected: json['polarConnected'] as bool? ?? false,
+        polarPackets: (json['polarPackets'] as List?)
+            ?.map((e) => Map<String, dynamic>.from(e as Map))
+            .toList(),
       );
 
   /// Resolve the real iOS NSDocumentDirectory via path_provider.
@@ -100,10 +110,20 @@ class PPGRecording {
   }
 
   /// Write recording to the app documents directory.
+  /// Saves a timestamped file (never overwritten) AND updates the latest
+  /// file so the existing Replay path keeps working.
   Future<void> save() async {
-    final path = await _resolveFilePath();
-    final file = File(path);
-    await file.writeAsString(jsonEncode(toJson()));
+    final dir = await getApplicationDocumentsDirectory();
+    final content = jsonEncode(toJson());
+
+    // Timestamped file — never overwritten
+    final epoch = DateTime.now().millisecondsSinceEpoch;
+    final timestampedFile = File('${dir.path}/ppg_session_$epoch.json');
+    await timestampedFile.writeAsString(content);
+
+    // Latest file — for Replay compatibility
+    final latestFile = File('${dir.path}/$_fileName');
+    await latestFile.writeAsString(content);
   }
 
   /// Load recording from the app documents directory. Returns null if absent.

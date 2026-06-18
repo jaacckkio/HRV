@@ -105,6 +105,7 @@ class _MeasurementScreenState extends State<MeasurementScreen>
   int _polarLatestHR = 0;
   int _polarRRCount = 0;
   DateTime _lastPolarUiTick = DateTime(0);
+  bool _polarWasConnected = false; // true if Polar connected at any point this session
 
   // DEV TOOLING — live comparison metrics (computed at 1 Hz in _updateLiveMetrics)
   double? _polarBPM;
@@ -196,6 +197,7 @@ class _MeasurementScreenState extends State<MeasurementScreen>
       _recordStartWallClock = null;
       // Polar
       _polarRRCount = 0;
+      _polarWasConnected = _polarState == PolarConnectionState.connected;
       _polarBPM = null;
       _polarMetrics = null;
       _cameraMetrics = null;
@@ -456,6 +458,11 @@ class _MeasurementScreenState extends State<MeasurementScreen>
       beats.add(RRBeat(beatOffsetMs: offsetMs, rrMs: rrMs));
     }
 
+    // Polar packets — save raw data if any exist, regardless of current state
+    final polarPkts = _polarService != null && _polarService!.packets.isNotEmpty
+        ? _polarService!.packets.map((p) => p.toJson()).toList()
+        : null;
+
     final recording = PPGRecording(
       startWallClockUtc:
           _recordStartWallClock ?? DateTime.now().toUtc().toIso8601String(),
@@ -464,6 +471,8 @@ class _MeasurementScreenState extends State<MeasurementScreen>
       clearBufferAtFrame: _recordClearAtFrame,
       samples: List.from(_recordedSamples),
       finalRRIntervals: beats,
+      polarConnected: _polarWasConnected,
+      polarPackets: polarPkts,
     );
 
     recording.save().then((_) {
@@ -579,6 +588,7 @@ class _MeasurementScreenState extends State<MeasurementScreen>
     );
     _polarService!.onStateChanged = (s) {
       if (!mounted) return;
+      if (s == PolarConnectionState.connected) _polarWasConnected = true;
       setState(() {
         _polarState = s;
         _polarError = _polarService?.errorMessage;
