@@ -683,6 +683,14 @@ class _MeasurementScreenState extends State<MeasurementScreen>
     _polarService!.startScan();
   }
 
+  void _polarRescan() {
+    if (_polarService != null) {
+      _polarService!.startScan();
+    } else {
+      _polarConnect();
+    }
+  }
+
   Future<void> _polarDisconnect() async {
     await _polarService?.dispose();
     _polarService = null;
@@ -1423,9 +1431,10 @@ class _MeasurementScreenState extends State<MeasurementScreen>
       PolarConnectionState.disconnected => 'Not connected',
       PolarConnectionState.scanning => 'Scanning\u2026',
       PolarConnectionState.connecting =>
-        'Connecting to ${_polarService?.deviceName ?? "Polar"}\u2026',
-      PolarConnectionState.connected =>
-        '${_polarService?.deviceName ?? "Polar"} \u2014 HR: $_polarLatestHR  RR: $_polarRRCount',
+        'Connecting to ${_polarService?.deviceName ?? "monitor"}\u2026',
+      PolarConnectionState.connected => _polarService?.noRRWarning == true
+        ? '${_polarService?.deviceName ?? "monitor"} \u2014 no beat-to-beat data (no HRV)'
+        : '${_polarService?.deviceName ?? "monitor"} \u2014 HR: $_polarLatestHR  RR: $_polarRRCount',
       PolarConnectionState.error => _polarError ?? 'Error',
     };
 
@@ -1473,7 +1482,7 @@ class _MeasurementScreenState extends State<MeasurementScreen>
           ),
           const SizedBox(width: 4),
           if (!isConnected && !isBusy)
-            _devButton('Connect', _polarConnect),
+            _devButton(isError ? 'Retry' : 'Connect', _polarRescan),
           if (isConnected)
             _devButton('Disconnect', _polarDisconnect),
           if (isBusy)

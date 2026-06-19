@@ -102,6 +102,15 @@ class PolarH10Service {
   // consecutive notifications (entire multi-value packets repeat).
   List<int>? _lastRrList;
 
+  // No-RR warning: some monitors send HR but no beat-to-beat RR intervals
+  DateTime? _connectedAt;
+  bool _hasReceivedRR = false;
+  bool get noRRWarning =>
+      _state == PolarConnectionState.connected &&
+      !_hasReceivedRR &&
+      _connectedAt != null &&
+      DateTime.now().difference(_connectedAt!).inSeconds >= 10;
+
   /// Start scanning for BLE heart rate monitors. Auto-connects to the strongest one
   /// after collecting candidates for up to 5 s, or 15 s total timeout.
   Future<void> startScan() async {
@@ -138,12 +147,9 @@ class PolarH10Service {
     try {
       _scanSub = FlutterBluePlus.onScanResults.listen((results) {
         for (final r in results) {
-          final name = r.device.platformName;
-          if (name.isNotEmpty) {
-            final existing = candidates[r.device.remoteId];
-            if (existing == null || r.rssi > existing.$2) {
-              candidates[r.device.remoteId] = (r.device, r.rssi);
-            }
+          final existing = candidates[r.device.remoteId];
+          if (existing == null || r.rssi > existing.$2) {
+            candidates[r.device.remoteId] = (r.device, r.rssi);
           }
         }
       });
@@ -166,7 +172,7 @@ class PolarH10Service {
         if (_state != PolarConnectionState.scanning) return;
 
         if (candidates.isEmpty) {
-          _setError('No heart rate monitor found — is it on and in range?');
+          _setError('No heart rate monitor found — is it worn, switched on, and in range?');
           return;
         }
 
@@ -182,6 +188,7 @@ class PolarH10Service {
 
   Future<void> _connectToDevice(BluetoothDevice device) async {
     _device = device;
+    _hasReceivedRR = false;
     _setState(PolarConnectionState.connecting);
 
     try {
@@ -235,6 +242,7 @@ class PolarH10Service {
       await hrChar.setNotifyValue(true);
       _charSub = hrChar.onValueReceived.listen(_onHRData);
 
+      _connectedAt = DateTime.now();
       _setState(PolarConnectionState.connected);
     } catch (e) {
       _setError('Connection failed: $e');
@@ -305,6 +313,10 @@ class PolarH10Service {
       }
     }
 
+    if (rrMs.isNotEmpty && !_hasReceivedRR) {
+      _hasReceivedRR = true;
+    }
+
     // Packet-level dedup: the H10 delivers each notification twice.
     // Two consecutive packets with identical multi-value RR lists is
     // physiologically impossible, so drop the duplicate RR values
@@ -358,6 +370,8 @@ class PolarH10Service {
     _latestHR = 0;
     _hasReconnected = false;
     _lastRrList = null;
+    _hasReceivedRR = false;
+    _connectedAt = null;
   }
 
   /// Full cleanup.
