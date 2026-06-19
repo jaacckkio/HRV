@@ -107,25 +107,67 @@ class ButterworthBandpassFilter {
   /// Creates a temporary filter with the given cutoffs, runs it forward,
   /// resets state, runs backward, and reverses the result. This eliminates
   /// phase distortion, giving symmetric peaks suitable for accurate timing.
+  ///
+  /// Uses odd (point) reflection padding at both ends (~1.5 s) so the filter
+  /// state settles before it reaches the real data — eliminates the startup
+  /// transient that otherwise corrupts the first beat and collapses short
+  /// rolling windows. This matches scipy.signal.filtfilt's default behaviour.
   static List<double> filtfilt(
       List<double> signal, double sampleRate, double lowHz, double highHz) {
     if (signal.isEmpty) return [];
     final f = ButterworthBandpassFilter.custom(
         sampleRate: sampleRate, lowHz: lowHz, highHz: highHz);
 
-    // Forward pass
-    final forward = List<double>.filled(signal.length, 0.0);
-    for (int i = 0; i < signal.length; i++) {
-      forward[i] = f.process(signal[i]);
+    final n = signal.length;
+    final padLen = n < 3 ? 0 : math.min((1.5 * sampleRate).round(), n - 1);
+
+    if (padLen < 1) {
+      // Too short to pad — fall back to unpadded forward/backward
+      final forward = List<double>.filled(n, 0.0);
+      for (int i = 0; i < n; i++) {
+        forward[i] = f.process(signal[i]);
+      }
+      f.reset();
+      final result = List<double>.filled(n, 0.0);
+      for (int i = n - 1; i >= 0; i--) {
+        result[i] = f.process(forward[i]);
+      }
+      return result;
+    }
+
+    // Build reflection-padded signal: [left pad | signal | right pad]
+    final paddedLen = padLen + n + padLen;
+    final padded = List<double>.filled(paddedLen, 0.0);
+    final first = signal[0];
+    final last = signal[n - 1];
+
+    // Left pad: odd reflection about signal[0], k = padLen down to 1
+    for (int k = padLen; k >= 1; k--) {
+      padded[padLen - k] = 2 * first - signal[k];
+    }
+    // Centre: original signal
+    for (int i = 0; i < n; i++) {
+      padded[padLen + i] = signal[i];
+    }
+    // Right pad: odd reflection about signal[last], k = 2 to padLen+1
+    for (int k = 2; k <= padLen + 1; k++) {
+      padded[padLen + n + (k - 2)] = 2 * last - signal[n - k];
+    }
+
+    // Forward pass over padded signal
+    final forward = List<double>.filled(paddedLen, 0.0);
+    for (int i = 0; i < paddedLen; i++) {
+      forward[i] = f.process(padded[i]);
     }
 
     // Reset state, backward pass
     f.reset();
-    final result = List<double>.filled(signal.length, 0.0);
-    for (int i = signal.length - 1; i >= 0; i--) {
-      result[i] = f.process(forward[i]);
+    final paddedResult = List<double>.filled(paddedLen, 0.0);
+    for (int i = paddedLen - 1; i >= 0; i--) {
+      paddedResult[i] = f.process(forward[i]);
     }
 
-    return result;
+    // Return central slice (drop padding)
+    return paddedResult.sublist(padLen, padLen + n);
   }
 }
