@@ -44,7 +44,7 @@ class PolarRRPacket {
       );
 }
 
-/// Manages BLE connection to a Polar H10 chest strap via the standard
+/// Manages BLE connection to any heart rate monitor via the standard
 /// Heart Rate Service (0x180D) / Heart Rate Measurement characteristic (0x2A37).
 ///
 /// Accepts a `nowMicros` closure tied to PPGService._frameStopwatch so that
@@ -102,7 +102,7 @@ class PolarH10Service {
   // consecutive notifications (entire multi-value packets repeat).
   List<int>? _lastRrList;
 
-  /// Start scanning for Polar devices. Auto-connects to the strongest one
+  /// Start scanning for BLE heart rate monitors. Auto-connects to the strongest one
   /// after collecting candidates for up to 5 s, or 15 s total timeout.
   Future<void> startScan() async {
     if (_state == PolarConnectionState.scanning ||
@@ -139,7 +139,7 @@ class PolarH10Service {
       _scanSub = FlutterBluePlus.onScanResults.listen((results) {
         for (final r in results) {
           final name = r.device.platformName;
-          if (name.toLowerCase().contains('polar')) {
+          if (name.isNotEmpty) {
             final existing = candidates[r.device.remoteId];
             if (existing == null || r.rssi > existing.$2) {
               candidates[r.device.remoteId] = (r.device, r.rssi);
@@ -166,7 +166,7 @@ class PolarH10Service {
         if (_state != PolarConnectionState.scanning) return;
 
         if (candidates.isEmpty) {
-          _setError('No Polar device found — is it worn and in range?');
+          _setError('No heart rate monitor found — is it on and in range?');
           return;
         }
 
@@ -253,7 +253,7 @@ class PolarH10Service {
       _setState(PolarConnectionState.connecting);
       _connectToDevice(_device!);
     } else {
-      _setError('Polar disconnected');
+      _setError('Heart rate monitor disconnected');
     }
   }
 
