@@ -4,12 +4,8 @@ import android.content.Context
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraManager
 import android.hardware.camera2.CameraMetadata
-import android.hardware.camera2.CaptureRequest
 import android.util.Log
 import android.util.Range
-import androidx.camera.camera2.interop.Camera2CameraControl
-import androidx.camera.camera2.interop.CaptureRequestOptions
-import androidx.camera.lifecycle.ProcessCameraProvider
 import io.flutter.plugin.common.BinaryMessenger
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
@@ -18,13 +14,15 @@ import io.flutter.plugin.common.MethodChannel
  * Native Android camera control plugin that mirrors the iOS CameraControlPlugin.
  *
  * Handles method channel `vagal_hrv_camera/camera_control` with four methods:
- * - lockCameraSettings: Reports AE/AF capability, attempts WB lock via CameraX Camera2Interop
- * - unlockCameraSettings: Releases WB lock
- * - setHighFrameRate: Queries camera capabilities, sets highest FPS via Camera2Interop
- * - setFrameRate: Sets a specific FPS target via Camera2Interop
+ * - lockCameraSettings: Reports AE/AF/AWB capability via CameraCharacteristics
+ * - unlockCameraSettings: Resets lock state
+ * - setHighFrameRate: Queries camera capabilities for highest supported FPS
+ * - setFrameRate: Queries camera capabilities for a specific FPS target
  *
  * Exposure and focus locking on Android is handled by the Dart layer using
  * the camera package's setExposureMode/setFocusMode APIs.
+ * WB lock is reported as unsupported (requires CameraX interop not available here).
+ * FPS ranges are enumerated and reported so the Dart layer knows device capabilities.
  */
 class CameraControlPlugin private constructor(
     private val context: Context
@@ -61,7 +59,8 @@ class CameraControlPlugin private constructor(
      * Lock camera settings. On Android:
      * - AE (exposure) and AF (focus) locking is done by the Dart layer via the
      *   camera package's cross-platform API. We report device capability here.
-     * - WB (white balance) lock is attempted via CameraX Camera2Interop.
+     * - WB (white balance) lock requires CameraX interop which isn't available
+     *   from this plugin context, so we report capability but don't lock.
      */
     private fun lockCameraSettings(): Map<String, Any?> {
         try {
@@ -90,80 +89,16 @@ class CameraControlPlugin private constructor(
             ) ?: intArrayOf()
             val afLockAvailable = afModes.isNotEmpty()
 
-            // Attempt WB lock via CameraX Camera2Interop
-            var wbActuallyLocked = false
-            var wbError: String? = null
-
-            if (awbLockAvailable) {
-                try {
-                    val cameraProvider = ProcessCameraProvider.getInstance(context).get()
-                    val boundCameras = cameraProvider.boundCameraInfos
-                    if (boundCameras.isNotEmpty()) {
-                        // Get the camera control from CameraX
-                        // We need the bound camera - find it via the provider
-                        val cameraSelector = androidx.camera.core.CameraSelector.DEFAULT_BACK_CAMERA
-                        // We can't directly get camera control without binding, but
-                        // the Flutter camera plugin has already bound the camera.
-                        // Use Camera2CameraControl via the bound camera info.
-                        try {
-                            val options = CaptureRequestOptions.Builder()
-                                .setCaptureRequestOption(
-                                    CaptureRequest.CONTROL_AWB_LOCK,
-                                    true
-                                )
-                                .build()
-
-                            // Try to get Camera2CameraControl from the bound camera
-                            for (info in boundCameras) {
-                                try {
-                                    val camera2Control = Camera2CameraControl.from(
-                                        cameraProvider.boundCameraInfos
-                                            .firstOrNull()
-                                            ?.let { cameraInfo ->
-                                                // Get the CameraControl associated with this info
-                                                // CameraX doesn't directly expose control from info,
-                                                // so we rebind to get the camera object
-                                                return@let null
-                                            } ?: continue
-                                    )
-                                } catch (e: Exception) {
-                                    Log.d(TAG, "Could not access Camera2CameraControl from info: ${e.message}")
-                                }
-                            }
-
-                            // Direct approach: the Flutter camera plugin manages the CameraX session.
-                            // We cannot easily get the Camera2CameraControl without the Camera object.
-                            // Report WB lock as unavailable via interop - the Dart layer handles AE/AF.
-                            wbError = "CameraX Camera2Interop: cannot access bound camera control from plugin"
-                            Log.d(TAG, "WB lock: $wbError")
-                        } catch (e: Exception) {
-                            wbError = "Camera2Interop WB lock failed: ${e.message}"
-                            Log.d(TAG, wbError!!)
-                        }
-                    } else {
-                        wbError = "No bound cameras found in CameraX provider"
-                        Log.d(TAG, wbError!!)
-                    }
-                } catch (e: Exception) {
-                    wbError = "ProcessCameraProvider not available: ${e.message}"
-                    Log.d(TAG, wbError!!)
-                }
-            } else {
-                wbError = "Device does not support AWB lock"
-                Log.d(TAG, wbError!!)
-            }
-
-            wbLocked = wbActuallyLocked
-
-            // Report AE and AF as locked if the device supports them —
-            // the actual locking is done by the Dart layer via camera package APIs
-            Log.d(TAG, "lockCameraSettings: ae=$aeLockAvailable, af=$afLockAvailable, wb=$wbActuallyLocked")
+            // WB lock requires CameraX Camera2Interop to set capture request options
+            // on the active camera session, which the Flutter camera plugin owns.
+            // Report as not locked; AE and AF are the critical locks for HRV measurement.
+            Log.d(TAG, "lockCameraSettings: ae=$aeLockAvailable, af=$afLockAvailable, awbCapable=$awbLockAvailable (not applied)")
 
             return mapOf(
                 "exposureLocked" to aeLockAvailable,
                 "focusLocked" to afLockAvailable,
-                "whiteBalanceLocked" to wbActuallyLocked,
-                "error" to wbError
+                "whiteBalanceLocked" to false,
+                "error" to if (!awbLockAvailable) "Device does not support AWB lock" else "WB lock requires CameraX interop (not available)"
             )
         } catch (e: Exception) {
             Log.e(TAG, "lockCameraSettings exception", e)
@@ -177,41 +112,20 @@ class CameraControlPlugin private constructor(
     }
 
     /**
-     * Unlock camera settings. WB unlock via Camera2Interop if it was locked.
-     * AE/AF unlock is handled by the Dart layer.
+     * Unlock camera settings. AE/AF unlock is handled by the Dart layer.
      */
     private fun unlockCameraSettings(): Map<String, Any?> {
-        try {
-            if (wbLocked) {
-                // If we managed to lock WB, try to unlock it
-                try {
-                    val cameraProvider = ProcessCameraProvider.getInstance(context).get()
-                    // Same limitation as lock — we can't easily access the bound camera control
-                    Log.d(TAG, "WB unlock: best-effort (Dart layer handles AE/AF)")
-                } catch (e: Exception) {
-                    Log.d(TAG, "WB unlock failed: ${e.message}")
-                }
-                wbLocked = false
-            }
-
-            return mapOf(
-                "success" to true,
-                "error" to null
-            )
-        } catch (e: Exception) {
-            Log.e(TAG, "unlockCameraSettings exception", e)
-            return mapOf(
-                "success" to false,
-                "error" to "Exception: ${e.message}"
-            )
-        }
+        wbLocked = false
+        Log.d(TAG, "unlockCameraSettings (Dart layer handles AE/AF)")
+        return mapOf(
+            "success" to true,
+            "error" to null
+        )
     }
 
     /**
      * Request the highest supported frame rate on the rear camera.
-     * Queries CameraCharacteristics for supported FPS ranges and attempts
-     * to set the target via CameraX Camera2Interop.
-     *
+     * Queries CameraCharacteristics for supported FPS ranges.
      * Preference: 120 → 60 → best available.
      */
     private fun setHighFrameRate(): Map<String, Any?> {
@@ -289,8 +203,8 @@ class CameraControlPlugin private constructor(
     }
 
     /**
-     * Apply a target FPS range via CameraX Camera2Interop.
-     * If the exact target isn't available, falls back to the highest supported ≤ target.
+     * Find the best FPS range for the target and report it back.
+     * The actual FPS setting is negotiated by the camera package based on device capabilities.
      */
     private fun applyFpsRange(
         targetFps: Int,
@@ -322,37 +236,12 @@ class CameraControlPlugin private constructor(
             }
         }
 
-        // Use a range pinned to [actualFps, actualFps] for consistent frame timing
-        val appliedRange = Range(actualFps, actualFps)
-        Log.d(TAG, "Applying FPS range: $appliedRange (target was $targetFps)")
+        Log.d(TAG, "FPS: device supports up to $actualFps fps (target was $targetFps)")
 
-        try {
-            val cameraProvider = ProcessCameraProvider.getInstance(context).get()
-            if (cameraProvider.boundCameraInfos.isEmpty()) {
-                return mapOf(
-                    "requestedFps" to actualFps.toDouble(),
-                    "error" to "No bound camera — FPS range queried but not applied"
-                )
-            }
-
-            // Attempt to set via Camera2Interop
-            // Note: The Flutter camera plugin manages the CameraX lifecycle. We can query
-            // capabilities but setting capture request options requires the Camera object,
-            // which the Flutter plugin holds internally. The FPS range is reported back
-            // so the Dart layer knows what the device supports.
-            Log.d(TAG, "FPS range $appliedRange: device supports up to $actualFps fps")
-
-            return mapOf(
-                "requestedFps" to actualFps.toDouble(),
-                "error" to null
-            )
-        } catch (e: Exception) {
-            Log.d(TAG, "Could not apply FPS range via CameraX: ${e.message}")
-            return mapOf(
-                "requestedFps" to actualFps.toDouble(),
-                "error" to "Queried capability ($actualFps fps) but could not apply: ${e.message}"
-            )
-        }
+        return mapOf(
+            "requestedFps" to actualFps.toDouble(),
+            "error" to null
+        )
     }
 
     /**
