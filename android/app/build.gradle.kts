@@ -39,6 +39,12 @@ android {
     }
 }
 
+dependencies {
+    // CameraX Camera2 interop — required for Camera2CameraControl and
+    // CaptureRequestOptions used by CameraControlPlugin
+    implementation("androidx.camera:camera-camera2:1.4.1")
+}
+
 flutter {
     source = "../.."
 }

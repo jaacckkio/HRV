@@ -6,7 +6,24 @@
       "Bash(where.exe flutter:*)",
       "Bash(git add:*)",
       "Bash(git commit:*)",
-      "Bash(git push:*)"
+      "Bash(git push:*)",
+      "Read(//c/Users/jack/flutter/bin/**)",
+      "Read(//c/flutter/bin/**)",
+      "Read(//c/Users/jack/Projects/HRV/$LOCALAPPDATA/flutter/bin/**)",
+      "Read(//c/Users/jack/AppData/Local/flutter/bin/**)",
+      "Read(//c/Users/jack/**)",
+      "Bash(grep -r \"MethodChannel\\\\|EventChannel\\\\|PlatformChannel\" /c/Users/jack/Projects/HRV/lib --include=*.dart)",
+      "Bash(grep -r services /c/Users/jack/Projects/HRV/lib --include=*.dart)",
+      "Bash(xargs grep:*)",
+      "Bash(flutter pub:*)",
+      "Bash(echo $PATH)",
+      "Bash(cmd.exe /c \"where flutter\" 2>&1)",
+      "Bash(find C:/Users/jack/AppData/Local/Pub/Cache -path */camera-*/lib/src/* -name *.dart)",
+      "Bash(find C:/Users/jack -maxdepth 6 -name camera_image.dart -path */camera*)",
+      "Bash(echo \"exit: $?\")",
+      "Read(//c/Users/jack/Projects/HRV/$HOME/flutter/bin/**)",
+      "Read(//c/dev/flutter/bin/**)",
+      "Read(//c/Users/jack/Projects/HRV/$HOME/development/flutter/bin/**)"
     ]
   }
 }

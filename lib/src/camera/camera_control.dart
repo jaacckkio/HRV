@@ -1,7 +1,7 @@
 import 'package:flutter/services.dart';
 
-/// Thin wrapper around the native iOS platform channel for locking/unlocking
-/// AVFoundation camera settings (exposure, focus, white balance).
+/// Thin wrapper around the native platform channel for camera settings
+/// (iOS: AVFoundation, Android: Camera2/CameraX).
 class CameraControl {
   static const _channel = MethodChannel('vagal_hrv_camera/camera_control');
 

@@ -343,6 +343,20 @@ class _MeasurementScreenState extends State<MeasurementScreen>
             'focus=${_nativeLockResult!.focusLocked} '
             'wb=${_nativeLockResult!.whiteBalanceLocked} '
             'err=${_nativeLockResult!.error}');
+
+        // Dart-level exposure/focus lock — works cross-platform via camera package
+        // (supplements native plugin; on iOS the native plugin already handles this,
+        // on Android this is the primary mechanism for AE and AF lock)
+        try {
+          await _controller!.setExposureMode(ExposureMode.locked);
+        } catch (e) {
+          debugPrint('Dart exposure lock failed: $e');
+        }
+        try {
+          await _controller!.setFocusMode(FocusMode.locked);
+        } catch (e) {
+          debugPrint('Dart focus lock failed: $e');
+        }
         _ppgService?.clearSignalBuffers();
         _filteredHistory.clear();
         // DEV TOOLING — mark clear point
@@ -412,6 +426,12 @@ class _MeasurementScreenState extends State<MeasurementScreen>
     if (_exposureLocked) {
       await CameraControl.unlockCameraSettings();
       debugPrint('Native camera unlock called');
+      try {
+        await _controller!.setExposureMode(ExposureMode.auto);
+        await _controller!.setFocusMode(FocusMode.auto);
+      } catch (e) {
+        debugPrint('Dart unlock failed: $e');
+      }
       _exposureLocked = false;
     }
 
