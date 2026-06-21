@@ -331,7 +331,7 @@ class PPGService {
     for (final (start, length) in runs) {
       final segment = _fullRawIntensity.sublist(start, start + length);
       final peaks =
-          PeakDetector.findPeaksAMPD(segment, fps);
+          PeakDetector.findPeaksAmplitudePriority(segment, fps);
 
       // Offset peaks back to full-signal coordinates
       for (final p in peaks) {
@@ -416,7 +416,8 @@ class PPGService {
       final diag = SegmentDiagnostics()
         ..start = start
         ..end = start + length;
-      final peaks = PeakDetector.findPeaksAMPD(segment, fps);
+      final peaks = PeakDetector.findPeaksAmplitudePriorityWithDiagnostics(
+          segment, fps, diag);
 
       for (final p in peaks) {
         allPeakIndices.add(p + start);
@@ -500,7 +501,7 @@ class PPGService {
       final segment =
           _fullRawIntensity.sublist(runStart, runStart + runLen);
       final peaks =
-          PeakDetector.findPeaksAMPD(segment, fps);
+          PeakDetector.findPeaksAmplitudePriority(segment, fps);
       final segRR = _peakDetector.peaksToRRIntervals(peaks, fps);
       allRR.addAll(segRR);
       for (final p in peaks) {
