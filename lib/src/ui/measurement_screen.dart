@@ -114,6 +114,14 @@ class _MeasurementScreenState extends State<MeasurementScreen>
   HrvResult? _polarMetrics;
   HrvResult? _cameraMetrics; // full-session HRV for comparison panel
 
+  // DEV TOOLING — tachogram (RR-vs-time overlay)
+  final List<(double, double)> _cameraRRPoints = []; // (timeSec, rrMs)
+  final List<(double, double)> _deviceRRPoints = []; // (timeSec, rrMs)
+  int? _bufferClearMicros;
+  int _lastDevicePacketIdx = 0;
+  DateTime? _lastCameraRRTime;
+  DateTime? _lastDeviceRRTime;
+
   // DEV TOOLING — Live (continuous) mode
   bool _continuousMode = false;
   int _elapsedSeconds = 0;
@@ -218,6 +226,13 @@ class _MeasurementScreenState extends State<MeasurementScreen>
       _polarBPM = null;
       _polarMetrics = null;
       _cameraMetrics = null;
+      // Tachogram
+      _cameraRRPoints.clear();
+      _deviceRRPoints.clear();
+      _bufferClearMicros = null;
+      _lastDevicePacketIdx = 0;
+      _lastCameraRRTime = null;
+      _lastDeviceRRTime = null;
       // Live mode
       _elapsedSeconds = 0;
     });
@@ -358,6 +373,7 @@ class _MeasurementScreenState extends State<MeasurementScreen>
           debugPrint('Dart focus lock failed: $e');
         }
         _ppgService?.clearSignalBuffers();
+        _bufferClearMicros = _ppgService?.sessionElapsedMicros;
         _filteredHistory.clear();
         // DEV TOOLING — mark clear point
         if (_isRecording) {
@@ -787,6 +803,18 @@ class _MeasurementScreenState extends State<MeasurementScreen>
           }
         }
       }
+
+      // DEV TOOLING — camera tachogram points
+      if (kShowDevTools && _bufferClearMicros != null) {
+        _cameraRRPoints.clear();
+        final fps = _ppgService!.effectiveFPS;
+        final peaks = fullResult.peakIndices;
+        for (int i = 0; i < allRR.length && i + 1 < peaks.length; i++) {
+          final timeSec = peaks[i + 1] / fps;
+          _cameraRRPoints.add((timeSec, allRR[i]));
+        }
+        if (allRR.isNotEmpty) _lastCameraRRTime = DateTime.now();
+      }
     } // end fingerNow
 
     // DEV TOOLING — Polar metrics (same artifact-filter + HrvCalculator path)
@@ -812,6 +840,26 @@ class _MeasurementScreenState extends State<MeasurementScreen>
       // RMSSD / SDNN / meanRR / beats — full session through HrvCalculator
       if (polarRR.length >= _rmssdMinBeats) {
         _polarMetrics = HrvCalculator.compute(polarRR);
+      }
+
+      // DEV TOOLING — device tachogram points (incremental, already deduped)
+      if (_bufferClearMicros != null) {
+        final packets = _polarService!.packets;
+        final prevLen = _deviceRRPoints.length;
+        for (int i = _lastDevicePacketIdx; i < packets.length; i++) {
+          final p = packets[i];
+          if (p.rrIntervalsMs.isEmpty) continue;
+          final timeSec =
+              (p.sessionMicros - _bufferClearMicros!) / 1e6;
+          if (timeSec < 0) continue;
+          for (final rr in p.rrIntervalsMs) {
+            _deviceRRPoints.add((timeSec, rr.toDouble()));
+          }
+        }
+        _lastDevicePacketIdx = packets.length;
+        if (_deviceRRPoints.length > prevLen) {
+          _lastDeviceRRTime = DateTime.now();
+        }
       }
     }
   }
@@ -916,9 +964,11 @@ class _MeasurementScreenState extends State<MeasurementScreen>
                   const SizedBox(height: 12),
                   if (kShowDevTools &&
                       _isScanning &&
-                      _polarState == PolarConnectionState.connected)
-                    _buildComparisonPanel()
-                  else
+                      _polarState == PolarConnectionState.connected) ...[
+                    _buildComparisonPanel(),
+                    const SizedBox(height: 12),
+                    _buildTachogramCard(),
+                  ] else
                     _buildRmssdStrip(),
                   if (kShowDevTools) ...[
                     const SizedBox(height: 12),
@@ -1152,8 +1202,14 @@ class _MeasurementScreenState extends State<MeasurementScreen>
             child: _filteredHistory.isEmpty
                 ? Center(child: Container(height: 1, color: _border))
                 : CustomPaint(
-                    painter:
-                        WaveformPainter(_filteredHistory, _teal, const []),
+                    painter: WaveformPainter(
+                      _filteredHistory,
+                      _teal,
+                      const [],
+                      _isScanning && _exposureLocked
+                          ? ((_ppgService?.effectiveFPS ?? 0) * 1.5).round()
+                          : 0,
+                    ),
                     child: Container(),
                   ),
           ),
@@ -1237,8 +1293,17 @@ class _MeasurementScreenState extends State<MeasurementScreen>
     );
   }
 
-  // DEV TOOLING — Camera vs Polar comparison panel
+  // DEV TOOLING — Camera vs device comparison panel
   Widget _buildComparisonPanel() {
+    final deviceLabel =
+        _polarService?.deviceName ?? 'Heart Rate Device';
+
+    // Live/stale indicators (green if data within 3 s, grey otherwise)
+    final cameraLive = _lastCameraRRTime != null &&
+        DateTime.now().difference(_lastCameraRRTime!).inSeconds < 3;
+    final deviceLive = _lastDeviceRRTime != null &&
+        DateTime.now().difference(_lastDeviceRRTime!).inSeconds < 3;
+
     // Camera values — BPM reads from _liveBPM (same as hero circle)
     final camBPM =
         _bpmSettled && _liveBPM != null ? '${_liveBPM!.round()}' : '\u2014';
@@ -1257,7 +1322,7 @@ class _MeasurementScreenState extends State<MeasurementScreen>
         ? '${_cameraMetrics!.totalIntervals}'
         : '\u2014';
 
-    // Polar values
+    // Device values
     final polBPM =
         _polarBPM != null ? '${_polarBPM!.round()}' : '\u2014';
     final polRMSSD = _polarMetrics != null && _polarMetrics!.rmssd > 0
@@ -1279,8 +1344,8 @@ class _MeasurementScreenState extends State<MeasurementScreen>
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Text('Camera vs Polar',
-              style: TextStyle(
+          Text('Camera vs $deviceLabel',
+              style: const TextStyle(
                   fontSize: 11,
                   color: _textSecondary,
                   fontWeight: FontWeight.w600)),
@@ -1288,6 +1353,7 @@ class _MeasurementScreenState extends State<MeasurementScreen>
           _comparisonRow(
             label: 'Camera',
             labelColor: _teal,
+            isLive: cameraLive,
             bpm: camBPM,
             rmssd: camRMSSD,
             sdnn: camSDNN,
@@ -1296,8 +1362,9 @@ class _MeasurementScreenState extends State<MeasurementScreen>
           ),
           const Divider(height: 12, thickness: 0.5, color: _border),
           _comparisonRow(
-            label: 'Polar',
+            label: deviceLabel,
             labelColor: const Color(0xFF2E7D32),
+            isLive: deviceLive,
             bpm: polBPM,
             rmssd: polRMSSD,
             sdnn: polSDNN,
@@ -1317,13 +1384,33 @@ class _MeasurementScreenState extends State<MeasurementScreen>
     required String sdnn,
     required String meanRR,
     required String beats,
+    bool? isLive,
   }) {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text(label,
-            style: TextStyle(
-                fontSize: 11, fontWeight: FontWeight.bold, color: labelColor)),
+        Row(
+          children: [
+            if (isLive != null) ...[
+              Container(
+                width: 6,
+                height: 6,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: isLive
+                      ? const Color(0xFF4CAF50)
+                      : const Color(0xFFBDBDBD),
+                ),
+              ),
+              const SizedBox(width: 4),
+            ],
+            Text(label,
+                style: TextStyle(
+                    fontSize: 11,
+                    fontWeight: FontWeight.bold,
+                    color: labelColor)),
+          ],
+        ),
         const SizedBox(height: 4),
         Row(
           children: [
@@ -1353,6 +1440,39 @@ class _MeasurementScreenState extends State<MeasurementScreen>
                   fontSize: 14,
                   fontWeight: FontWeight.bold,
                   color: _textPrimary)),
+        ],
+      ),
+    );
+  }
+
+  // DEV TOOLING — RR tachogram overlay (camera vs device)
+  Widget _buildTachogramCard() {
+    final deviceLabel = _polarService?.deviceName ?? 'Device';
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: _cardDecoration(),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text('RR Tachogram',
+              style: TextStyle(
+                  fontSize: 12,
+                  color: _textSecondary,
+                  fontWeight: FontWeight.w500)),
+          const SizedBox(height: 8),
+          SizedBox(
+            height: 140,
+            child: (_cameraRRPoints.isEmpty && _deviceRRPoints.isEmpty)
+                ? Center(child: Container(height: 1, color: _border))
+                : CustomPaint(
+                    painter: _TachogramPainter(
+                      cameraPoints: _cameraRRPoints,
+                      devicePoints: _deviceRRPoints,
+                      deviceName: deviceLabel,
+                    ),
+                    child: Container(),
+                  ),
+          ),
         ],
       ),
     );
@@ -1930,4 +2050,134 @@ class _HeroRingPainter extends CustomPainter {
   bool shouldRepaint(covariant _HeroRingPainter old) {
     return old.progress != progress || old.isActive != isActive;
   }
+}
+
+/// DEV TOOLING — Paints an overlaid RR tachogram with camera (teal) and
+/// device (green) series on a shared time axis.
+class _TachogramPainter extends CustomPainter {
+  final List<(double, double)> cameraPoints; // (timeSec, rrMs)
+  final List<(double, double)> devicePoints;
+  final String deviceName;
+
+  _TachogramPainter({
+    required this.cameraPoints,
+    required this.devicePoints,
+    required this.deviceName,
+  });
+
+  static const _cameraColor = Color(0xFF06A3B7);
+  static const _deviceColor = Color(0xFF4CAF50);
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    if (cameraPoints.isEmpty && devicePoints.isEmpty) return;
+    final w = size.width, h = size.height;
+
+    // Compute axis bounds from both series
+    double minT = double.infinity, maxT = -double.infinity;
+    double minRR = double.infinity, maxRR = -double.infinity;
+
+    for (final p in cameraPoints) {
+      if (p.$1 < minT) minT = p.$1;
+      if (p.$1 > maxT) maxT = p.$1;
+      if (p.$2 < minRR) minRR = p.$2;
+      if (p.$2 > maxRR) maxRR = p.$2;
+    }
+    for (final p in devicePoints) {
+      if (p.$1 < minT) minT = p.$1;
+      if (p.$1 > maxT) maxT = p.$1;
+      if (p.$2 < minRR) minRR = p.$2;
+      if (p.$2 > maxRR) maxRR = p.$2;
+    }
+
+    if (minT >= maxT) maxT = minT + 1;
+    if (minRR >= maxRR) {
+      minRR -= 50;
+      maxRR += 50;
+    }
+    final rrRange = maxRR - minRR;
+    minRR -= rrRange * 0.1;
+    maxRR += rrRange * 0.1;
+
+    final scaleX = w / (maxT - minT);
+    final scaleY = h / (maxRR - minRR);
+
+    Offset toCanvas((double, double) pt) {
+      return Offset(
+        (pt.$1 - minT) * scaleX,
+        h - (pt.$2 - minRR) * scaleY,
+      );
+    }
+
+    _drawSeries(canvas, cameraPoints, _cameraColor, toCanvas);
+    _drawSeries(canvas, devicePoints, _deviceColor, toCanvas);
+    _drawLegend(canvas, w);
+  }
+
+  void _drawSeries(
+    Canvas canvas,
+    List<(double, double)> points,
+    Color color,
+    Offset Function((double, double)) toCanvas,
+  ) {
+    if (points.isEmpty) return;
+
+    final linePaint = Paint()
+      ..color = color
+      ..strokeWidth = 1.5
+      ..style = PaintingStyle.stroke
+      ..strokeCap = StrokeCap.round;
+    final dotPaint = Paint()
+      ..color = color
+      ..style = PaintingStyle.fill;
+
+    final path = Path();
+    final first = toCanvas(points[0]);
+    path.moveTo(first.dx, first.dy);
+    canvas.drawCircle(first, 2, dotPaint);
+
+    for (int i = 1; i < points.length; i++) {
+      final pt = toCanvas(points[i]);
+      path.lineTo(pt.dx, pt.dy);
+      canvas.drawCircle(pt, 2, dotPaint);
+    }
+    canvas.drawPath(path, linePaint);
+  }
+
+  void _drawLegend(Canvas canvas, double width) {
+    final camPainter = TextPainter(
+      text: const TextSpan(
+          text: 'Camera',
+          style: TextStyle(
+              fontSize: 9,
+              fontWeight: FontWeight.w600,
+              color: Color(0xFF06A3B7))),
+      textDirection: TextDirection.ltr,
+    )..layout();
+
+    final devPainter = TextPainter(
+      text: TextSpan(
+          text: deviceName,
+          style: const TextStyle(
+              fontSize: 9,
+              fontWeight: FontWeight.w600,
+              color: _deviceColor)),
+      textDirection: TextDirection.ltr,
+    )..layout();
+
+    final legendW = camPainter.width + devPainter.width + 30;
+    final x = width - legendW - 4;
+
+    canvas.drawCircle(
+        Offset(x + 4, 8), 3, Paint()..color = _cameraColor);
+    camPainter.paint(canvas, Offset(x + 10, 2));
+
+    final devX = x + camPainter.width + 20;
+    canvas.drawCircle(
+        Offset(devX + 4, 8), 3, Paint()..color = _deviceColor);
+    devPainter.paint(canvas, Offset(devX + 10, 2));
+  }
+
+  @override
+  bool shouldRepaint(covariant _TachogramPainter old) => true;
 }
