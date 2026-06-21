@@ -76,7 +76,6 @@ class _MeasurementScreenState extends State<MeasurementScreen>
   static const int _rmssdMinBeats = 20;
   double? _liveBPM;
   double? _liveRMSSD;
-  List<int> _livePeakIndicesInFull = [];
   Timer? _liveMetricsTimer;
 
   // Stability-based reveal gating — metrics show "Measuring…" until settled
@@ -203,7 +202,6 @@ class _MeasurementScreenState extends State<MeasurementScreen>
       _sessionRRIntervals.clear();
       _liveBPM = null;
       _liveRMSSD = null;
-      _livePeakIndicesInFull = [];
       _bpmSettled = false;
       _rmssdSettled = false;
       _bpmHistory.clear();
@@ -747,19 +745,32 @@ class _MeasurementScreenState extends State<MeasurementScreen>
         : 0;
 
     if (fingerNow) {
-      // BPM — from trailing-window ROI detection (15 s window)
-      final windowResult = _ppgService!.computeRollingWindowDetection(
-          windowSeconds: _rollingWindowSeconds);
-      _livePeakIndicesInFull = windowResult.peakIndicesInFullSignal;
+      // Full-signal detection (used for both BPM and RMSSD)
+      final fullResult = _ppgService!.computeFinalRRIntervals();
+      final allRR = fullResult.rrIntervals;
 
-      if (windowResult.rrIntervals.isNotEmpty) {
-        double sum = 0;
-        for (final rr in windowResult.rrIntervals) {
-          sum += rr;
+      // BPM — from trailing window of full-signal RR intervals.
+      // Uses the same peaks as the final result, avoiding the filtfilt
+      // edge-effect problem that breaks the 15-second rolling window.
+      if (allRR.isNotEmpty) {
+        final double windowMs = _rollingWindowSeconds * 1000.0;
+        double cumMs = 0;
+        int startIdx = allRR.length;
+        for (int i = allRR.length - 1; i >= 0; i--) {
+          cumMs += allRR[i];
+          startIdx = i;
+          if (cumMs >= windowMs) break;
         }
-        _liveBPM = 60000.0 / (sum / windowResult.rrIntervals.length);
+        final trailingRR = allRR.sublist(startIdx);
+        if (trailingRR.isNotEmpty) {
+          double sum = 0;
+          for (final rr in trailingRR) {
+            sum += rr;
+          }
+          _liveBPM = 60000.0 / (sum / trailingRR.length);
+        }
 
-        // BPM settle check
+        // BPM settle check (unchanged logic)
         if (!_bpmSettled && _liveBPM != null) {
           _bpmHistory.add(_liveBPM!);
           if (_bpmHistory.length > _settleHistoryLen) {
@@ -777,8 +788,6 @@ class _MeasurementScreenState extends State<MeasurementScreen>
 
       // RMSSD — from full accumulated signal, through the same artifact filter
       // and gap-aware RMSSD that HrvCalculator uses for the final result.
-      final fullResult = _ppgService!.computeFinalRRIntervals();
-      final allRR = fullResult.rrIntervals;
 
       if (allRR.length >= _rmssdMinBeats) {
         final hrvResult = HrvCalculator.compute(allRR);
