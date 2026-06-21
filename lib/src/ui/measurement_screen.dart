@@ -1,5 +1,5 @@
 import 'dart:async';
-import 'dart:io' show Platform;
+import 'dart:io' show File, Platform;
 import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:camera/camera.dart';
@@ -14,6 +14,8 @@ import '../recording/ppg_recording.dart';
 import 'widgets/waveform_painter.dart';
 import 'widgets/finger_guide_animation.dart';
 import '../polar/polar_h10_service.dart';
+import 'package:share_plus/share_plus.dart';
+import 'package:path_provider/path_provider.dart';
 import 'results_screen.dart';
 
 /// Set to true to show developer scaffolding (FPS line, record/replay
@@ -74,6 +76,10 @@ class _MeasurementScreenState extends State<MeasurementScreen>
   // Live metrics — updated at 1 Hz via rolling ROI detection
   static const int _rollingWindowSeconds = 15;
   static const int _rmssdMinBeats = 20;
+
+  // Dev mode — warmup discard + shared trailing window for comparison
+  static const int _warmupSeconds = 5;
+  static const int _trailingWindowSeconds = 25;
   double? _liveBPM;
   double? _liveRMSSD;
   Timer? _liveMetricsTimer;
@@ -124,6 +130,20 @@ class _MeasurementScreenState extends State<MeasurementScreen>
   // DEV TOOLING — Live (continuous) mode
   bool _continuousMode = false;
   int _elapsedSeconds = 0;
+
+  // DEV TOOLING — warmup gate (discard first N seconds post-lock from display)
+  bool _warmupComplete = false;
+  DateTime? _warmupEndTime;
+
+  // DEV TOOLING — saved file path for on-screen display + share
+  String? _savedFilePath;
+
+  // DEV TOOLING — trailing-window per-source secondary metrics
+  double? _cameraTrailingRMSSD;
+  int? _cameraTrailingBeats;
+  double? _polarTrailingRMSSD;
+  int? _polarTrailingBeats;
+  int _polarReportedHR = 0; // strap's own reported HR field
 
   // DEV TOOLING — switchable camera FPS (chosen while idle, applied at Start)
   int _selectedFps = 120;
@@ -193,6 +213,12 @@ class _MeasurementScreenState extends State<MeasurementScreen>
     _ppgService?.dispose();
     _ppgService = PPGService();
 
+    // Dev mode: force continuous (no countdown) and always record
+    if (kShowDevTools) {
+      _continuousMode = true;
+      _isRecording = true;
+    }
+
     setState(() {
       _isScanning = true;
       _timeLeft = _selectedDuration;
@@ -233,6 +259,16 @@ class _MeasurementScreenState extends State<MeasurementScreen>
       _lastDeviceRRTime = null;
       // Live mode
       _elapsedSeconds = 0;
+      // Warmup
+      _warmupComplete = false;
+      _warmupEndTime = null;
+      _savedFilePath = null;
+      // Trailing-window metrics
+      _cameraTrailingRMSSD = null;
+      _cameraTrailingBeats = null;
+      _polarTrailingRMSSD = null;
+      _polarTrailingBeats = null;
+      _polarReportedHR = 0;
     });
 
     // Clear Polar packets for fresh session
@@ -323,9 +359,11 @@ class _MeasurementScreenState extends State<MeasurementScreen>
         ));
       }
 
-      // Accumulate visualization data
-      _filteredHistory.add(signal.filteredIntensity);
-      if (_filteredHistory.length > _historyLimit) _filteredHistory.removeAt(0);
+      // Accumulate visualization data — skip during warmup in dev mode
+      if (!kShowDevTools || _warmupComplete) {
+        _filteredHistory.add(signal.filteredIntensity);
+        if (_filteredHistory.length > _historyLimit) _filteredHistory.removeAt(0);
+      }
 
       // === Phase 1: Waiting for finger ===
       if (!_fingerFirstDetected) {
@@ -390,7 +428,31 @@ class _MeasurementScreenState extends State<MeasurementScreen>
       }
 
       final measuringElapsed = DateTime.now().difference(_measuringStartTime!);
-      if (measuringElapsed.inMilliseconds <= 5000) {
+
+      // Dev warmup gate: discard first N seconds post-lock from display and
+      // detection buffers so the DC-settle / exposure-lock transient never
+      // enters any graph or skews peak detection.
+      if (kShowDevTools && !_warmupComplete) {
+        if (measuringElapsed.inSeconds < _warmupSeconds) {
+          _status = 'Warmup ${_warmupSeconds - measuringElapsed.inSeconds}s\u2026';
+          return;
+        }
+        // Warmup just finished — clear everything and start fresh
+        _warmupComplete = true;
+        _warmupEndTime = DateTime.now();
+        _ppgService?.clearSignalBuffers();
+        _bufferClearMicros = _ppgService?.sessionElapsedMicros;
+        _filteredHistory.clear();
+        if (_isRecording) {
+          _recordClearAtFrame = _recordedSamples.length;
+        }
+        // Also clear Polar packets accumulated during warmup
+        _polarService?.clearPackets();
+        _polarRRCount = 0;
+        _elapsedSeconds = 0;
+      }
+
+      if (measuringElapsed.inMilliseconds <= 5000 && !kShowDevTools) {
         _status = 'Stabilising signal...';
       } else if (!signal.fingerDetected) {
         _status = 'No finger detected — place finger over camera and flash';
@@ -402,7 +464,8 @@ class _MeasurementScreenState extends State<MeasurementScreen>
         };
       }
 
-      if (measuringElapsed.inMilliseconds > 5000) {
+      final pastWarmup = kShowDevTools ? _warmupComplete : measuringElapsed.inMilliseconds > 5000;
+      if (pastWarmup) {
         for (final rr in signal.rrIntervals) {
           _rrHistory.add(rr);
           _sessionRRIntervals.add(rr);
@@ -461,11 +524,20 @@ class _MeasurementScreenState extends State<MeasurementScreen>
           selectedMovingAvgWindow: finalResult.selectedWindowSec,
         );
 
-        // DEV TOOLING — save recording if enabled
-        if (_isRecording && _recordedSamples.isNotEmpty) {
+        // DEV TOOLING — save recording + share sheet, stay on this screen
+        if (kShowDevTools && _isRecording && _recordedSamples.isNotEmpty) {
           _saveRecording(finalResult);
+          // _savedFilePath is set async by _saveRecording → _shareRecording
+          _isTransitioning = false;
+          if (mounted) {
+            setState(() {
+              _status = 'Session saved. Tap Start for a new session.';
+            });
+          }
+          return;
         }
 
+        // Production path — navigate to results screen
         Navigator.pushReplacement(
           context,
           MaterialPageRoute(
@@ -565,10 +637,26 @@ class _MeasurementScreenState extends State<MeasurementScreen>
       diagnostics: diagnosticsMap,
     );
 
-    recording.save().then((_) {
+    recording.save().then((_) async {
       debugPrint(
           'Recording saved: ${_recordedSamples.length} frames, '
           '${beats.length} beats');
+      // Get the timestamped file path for display + share
+      final dir = await getApplicationDocumentsDirectory();
+      // Find the most recent ppg_session_*.json file
+      final files = dir.listSync()
+          .whereType<File>()
+          .where((f) => f.path.contains('ppg_session_'))
+          .toList()
+        ..sort((a, b) => b.path.compareTo(a.path));
+      if (files.isNotEmpty) {
+        final savedPath = files.first.path;
+        if (mounted) {
+          setState(() => _savedFilePath = savedPath);
+        }
+        // Present share sheet
+        await Share.shareXFiles([XFile(savedPath)]);
+      }
     }).catchError((e) {
       debugPrint('Failed to save recording: $e');
     });
@@ -718,13 +806,32 @@ class _MeasurementScreenState extends State<MeasurementScreen>
     }
   }
 
+  /// Extract trailing-window RR intervals from a full list.
+  /// Returns the sublist spanning the last [windowSeconds] worth of RR time.
+  List<double> _trailingRR(List<double> allRR, int windowSeconds) {
+    final double windowMs = windowSeconds * 1000.0;
+    double cumMs = 0;
+    int startIdx = allRR.length;
+    for (int i = allRR.length - 1; i >= 0; i--) {
+      cumMs += allRR[i];
+      startIdx = i;
+      if (cumMs >= windowMs) break;
+    }
+    return allRR.sublist(startIdx);
+  }
+
   /// Recompute live BPM, RMSSD, and waveform peak markers at ~1 Hz.
   /// Uses the same PeakDetector.findPeaksROI and HrvCalculator/artifact-filter
   /// pipeline as the final end-of-measurement result.
   void _updateLiveMetrics() {
     if (_ppgService == null || !_exposureLocked) return;
+    // Dev mode: skip until warmup is complete
+    if (kShowDevTools && !_warmupComplete) return;
 
     final fingerNow = _currentSignal?.fingerDetected ?? false;
+
+    // The trailing window used for both camera and device in dev mode
+    final windowSec = kShowDevTools ? _trailingWindowSeconds : _rollingWindowSeconds;
 
     // Suspend all camera metrics while finger is absent — avoids showing
     // stale or noise-derived values. When the finger returns, settle checks
@@ -733,6 +840,8 @@ class _MeasurementScreenState extends State<MeasurementScreen>
       _liveBPM = null;
       _liveRMSSD = null;
       _cameraMetrics = null;
+      _cameraTrailingRMSSD = null;
+      _cameraTrailingBeats = null;
       _bpmSettled = false;
       _rmssdSettled = false;
       _bpmHistory.clear();
@@ -753,21 +862,20 @@ class _MeasurementScreenState extends State<MeasurementScreen>
       // Uses the same peaks as the final result, avoiding the filtfilt
       // edge-effect problem that breaks the 15-second rolling window.
       if (allRR.isNotEmpty) {
-        final double windowMs = _rollingWindowSeconds * 1000.0;
-        double cumMs = 0;
-        int startIdx = allRR.length;
-        for (int i = allRR.length - 1; i >= 0; i--) {
-          cumMs += allRR[i];
-          startIdx = i;
-          if (cumMs >= windowMs) break;
-        }
-        final trailingRR = allRR.sublist(startIdx);
+        final trailingRR = _trailingRR(allRR, windowSec);
         if (trailingRR.isNotEmpty) {
           double sum = 0;
           for (final rr in trailingRR) {
             sum += rr;
           }
           _liveBPM = 60000.0 / (sum / trailingRR.length);
+
+          // Trailing-window RMSSD + beat count for comparison panel
+          if (kShowDevTools && trailingRR.length >= 3) {
+            final twHrv = HrvCalculator.compute(trailingRR);
+            _cameraTrailingRMSSD = twHrv.rmssd > 0 ? twHrv.rmssd : null;
+            _cameraTrailingBeats = trailingRR.length;
+          }
         }
 
         // BPM settle check (unchanged logic)
@@ -832,17 +940,25 @@ class _MeasurementScreenState extends State<MeasurementScreen>
         _polarState == PolarConnectionState.connected) {
       final polarRR = _polarService!.allRRIntervalsMs;
 
-      // BPM — trailing ~15 s window (same semantics as camera's rolling window)
+      // Capture strap's own reported HR
+      _polarReportedHR = _polarLatestHR;
+
+      // BPM — trailing window (same semantics as camera's rolling window)
       if (polarRR.isNotEmpty) {
-        double windowSum = 0;
-        int windowCount = 0;
-        for (int i = polarRR.length - 1; i >= 0; i--) {
-          windowSum += polarRR[i];
-          windowCount++;
-          if (windowSum >= _rollingWindowSeconds * 1000) break;
-        }
-        if (windowCount > 0) {
-          _polarBPM = 60000.0 / (windowSum / windowCount);
+        final trailingRR = _trailingRR(polarRR, windowSec);
+        if (trailingRR.isNotEmpty) {
+          double windowSum = 0;
+          for (final rr in trailingRR) {
+            windowSum += rr;
+          }
+          _polarBPM = 60000.0 / (windowSum / trailingRR.length);
+
+          // Trailing-window RMSSD + beat count
+          if (trailingRR.length >= 3) {
+            final twHrv = HrvCalculator.compute(trailingRR);
+            _polarTrailingRMSSD = twHrv.rmssd > 0 ? twHrv.rmssd : null;
+            _polarTrailingBeats = trailingRR.length;
+          }
         }
       }
 
@@ -943,7 +1059,15 @@ class _MeasurementScreenState extends State<MeasurementScreen>
               child: Column(
                 children: [
                   const SizedBox(height: 12),
-                  _buildDurationSelector(),
+                  // Dev mode: hide duration selector while scanning (forced Live)
+                  if (!kShowDevTools || !_isScanning)
+                    _buildDurationSelector(),
+                  if (kShowDevTools && _isScanning)
+                    Text('Live',
+                        style: TextStyle(
+                            fontSize: 15,
+                            fontWeight: FontWeight.w600,
+                            color: _teal.withOpacity(0.5))),
                   const SizedBox(height: 24),
                   _buildHeroCircle(hrDisplay),
                   const SizedBox(height: 16),
@@ -960,6 +1084,26 @@ class _MeasurementScreenState extends State<MeasurementScreen>
                       textAlign: TextAlign.center,
                     ),
                   ],
+                  // Saved file path after Stop
+                  if (kShowDevTools && _savedFilePath != null) ...[
+                    const SizedBox(height: 8),
+                    Container(
+                      padding: const EdgeInsets.all(8),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFFE8F5E9),
+                        borderRadius: BorderRadius.circular(8),
+                        border: Border.all(color: const Color(0xFF81C784)),
+                      ),
+                      child: Text(
+                        'Saved: ${_savedFilePath!.split('/').last}',
+                        style: const TextStyle(
+                            fontSize: 10,
+                            color: Color(0xFF2E7D32),
+                            fontWeight: FontWeight.w500),
+                        textAlign: TextAlign.center,
+                      ),
+                    ),
+                  ],
                   if (kShowDevTools) ...[
                     const SizedBox(height: 8),
                     _buildDevToolbar(),
@@ -969,16 +1113,20 @@ class _MeasurementScreenState extends State<MeasurementScreen>
                     _buildFpsPicker(),
                   ],
                   const SizedBox(height: 20),
-                  _buildPulseWaveformCard(),
-                  const SizedBox(height: 12),
+                  // Dev mode with Polar: show comparison panel + charts
                   if (kShowDevTools &&
-                      _isScanning &&
-                      _polarState == PolarConnectionState.connected) ...[
+                      _polarState == PolarConnectionState.connected &&
+                      (_isScanning || _savedFilePath != null)) ...[
                     _buildComparisonPanel(),
                     const SizedBox(height: 12),
+                    _buildPulseWaveformCard(),
+                    const SizedBox(height: 12),
                     _buildTachogramCard(),
-                  ] else
+                  ] else ...[
+                    _buildPulseWaveformCard(),
+                    const SizedBox(height: 12),
                     _buildRmssdStrip(),
+                  ],
                   if (kShowDevTools) ...[
                     const SizedBox(height: 12),
                     _buildRRHistoryCard(),
@@ -987,9 +1135,10 @@ class _MeasurementScreenState extends State<MeasurementScreen>
                 ],
               ),
             ),
-            // Start button — State A only (or Stop in continuous mode)
+            // Start button — State A only
             if (!_isScanning) _buildStartButton(),
-            if (_isScanning && _continuousMode) _buildStopButton(),
+            // Stop button — dev mode always shows when scanning; prod only in continuous mode
+            if (_isScanning && (kShowDevTools || _continuousMode)) _buildStopButton(),
             // Duration picker overlay
             if (_showDurationPicker && !_isScanning) _buildDurationPicker(),
             // Help overlay
@@ -1302,10 +1451,9 @@ class _MeasurementScreenState extends State<MeasurementScreen>
     );
   }
 
-  // DEV TOOLING — Camera vs device comparison panel
+  // DEV TOOLING — Two-column live comparison: Camera vs Device
   Widget _buildComparisonPanel() {
-    final deviceLabel =
-        _polarService?.deviceName ?? 'Heart Rate Device';
+    final deviceLabel = _polarService?.deviceName ?? 'Device';
 
     // Live/stale indicators (green if data within 3 s, grey otherwise)
     final cameraLive = _lastCameraRRTime != null &&
@@ -1313,144 +1461,218 @@ class _MeasurementScreenState extends State<MeasurementScreen>
     final deviceLive = _lastDeviceRRTime != null &&
         DateTime.now().difference(_lastDeviceRRTime!).inSeconds < 3;
 
-    // Camera values — BPM reads from _liveBPM (same as hero circle)
-    final camBPM =
-        _bpmSettled && _liveBPM != null ? '${_liveBPM!.round()}' : '\u2014';
-    final camRMSSD = _rmssdSettled && _liveRMSSD != null
-        ? _liveRMSSD!.toStringAsFixed(1)
-        : '\u2014';
-
-    // Camera full-session HRV for SDNN / meanRR / beats (from 1 Hz update)
-    final camSDNN = _cameraMetrics != null
-        ? _cameraMetrics!.sdnn.toStringAsFixed(1)
-        : '\u2014';
-    final camMeanRR = _cameraMetrics != null
-        ? _cameraMetrics!.meanRR.round().toString()
-        : '\u2014';
-    final camBeats = _cameraMetrics != null
-        ? '${_cameraMetrics!.totalIntervals}'
-        : '\u2014';
+    // Camera values
+    final camBPM = _liveBPM != null ? '${_liveBPM!.round()}' : '--';
+    final camRMSSD = _cameraTrailingRMSSD != null
+        ? _cameraTrailingRMSSD!.toStringAsFixed(1)
+        : '--';
+    final camBeats = _cameraTrailingBeats != null
+        ? '$_cameraTrailingBeats'
+        : '--';
 
     // Device values
-    final polBPM =
-        _polarBPM != null ? '${_polarBPM!.round()}' : '\u2014';
-    final polRMSSD = _polarMetrics != null && _polarMetrics!.rmssd > 0
-        ? _polarMetrics!.rmssd.toStringAsFixed(1)
-        : '\u2014';
-    final polSDNN = _polarMetrics != null && _polarMetrics!.sdnn > 0
-        ? _polarMetrics!.sdnn.toStringAsFixed(1)
-        : '\u2014';
-    final polMeanRR = _polarMetrics != null && _polarMetrics!.meanRR > 0
-        ? _polarMetrics!.meanRR.round().toString()
-        : '\u2014';
-    final polBeats = _polarMetrics != null
-        ? '${_polarMetrics!.totalIntervals}'
-        : '\u2014';
+    final devBPM = _polarBPM != null ? '${_polarBPM!.round()}' : '--';
+    final devRMSSD = _polarTrailingRMSSD != null
+        ? _polarTrailingRMSSD!.toStringAsFixed(1)
+        : '--';
+    final devBeats = _polarTrailingBeats != null
+        ? '$_polarTrailingBeats'
+        : '--';
+
+    // Stream status text
+    String cameraStatus;
+    Color cameraStatusColor;
+    if (!_isScanning) {
+      cameraStatus = 'Stopped';
+      cameraStatusColor = _textSecondary;
+    } else if (!_warmupComplete) {
+      cameraStatus = 'Warmup';
+      cameraStatusColor = const Color(0xFFFFA726);
+    } else if (!(_currentSignal?.fingerDetected ?? false)) {
+      cameraStatus = 'Finger off';
+      cameraStatusColor = _error;
+    } else {
+      cameraStatus = 'Streaming';
+      cameraStatusColor = _success;
+    }
+
+    String deviceStatus;
+    Color deviceStatusColor;
+    if (!_isScanning) {
+      deviceStatus = 'Stopped';
+      deviceStatusColor = _textSecondary;
+    } else if (_polarState != PolarConnectionState.connected) {
+      deviceStatus = 'Disconnected';
+      deviceStatusColor = _error;
+    } else if (_polarService?.noRRWarning == true) {
+      deviceStatus = 'No RR data';
+      deviceStatusColor = _error;
+    } else {
+      deviceStatus = 'Streaming';
+      deviceStatusColor = _success;
+    }
 
     return Container(
-      padding: const EdgeInsets.all(12),
+      padding: const EdgeInsets.all(16),
       decoration: _cardDecoration(),
       child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text('Camera vs $deviceLabel',
+          // Header
+          Text('${_trailingWindowSeconds}s trailing window',
               style: const TextStyle(
-                  fontSize: 11,
+                  fontSize: 10,
                   color: _textSecondary,
-                  fontWeight: FontWeight.w600)),
-          const SizedBox(height: 8),
-          _comparisonRow(
-            label: 'Camera',
-            labelColor: _teal,
-            isLive: cameraLive,
-            bpm: camBPM,
-            rmssd: camRMSSD,
-            sdnn: camSDNN,
-            meanRR: camMeanRR,
-            beats: camBeats,
-          ),
-          const Divider(height: 12, thickness: 0.5, color: _border),
-          _comparisonRow(
-            label: deviceLabel,
-            labelColor: const Color(0xFF2E7D32),
-            isLive: deviceLive,
-            bpm: polBPM,
-            rmssd: polRMSSD,
-            sdnn: polSDNN,
-            meanRR: polMeanRR,
-            beats: polBeats,
+                  fontWeight: FontWeight.w500)),
+          const SizedBox(height: 12),
+          // Two-column big numbers
+          Row(
+            children: [
+              // Camera column
+              Expanded(
+                child: _comparisonColumn(
+                  label: 'Camera',
+                  labelColor: _teal,
+                  bpm: camBPM,
+                  rmssd: camRMSSD,
+                  beats: camBeats,
+                  statusText: cameraStatus,
+                  statusColor: cameraStatusColor,
+                  isLive: cameraLive,
+                ),
+              ),
+              Container(width: 1, height: 100, color: _border),
+              // Device column
+              Expanded(
+                child: _comparisonColumn(
+                  label: deviceLabel,
+                  labelColor: const Color(0xFF2E7D32),
+                  bpm: devBPM,
+                  rmssd: devRMSSD,
+                  beats: devBeats,
+                  statusText: deviceStatus,
+                  statusColor: deviceStatusColor,
+                  isLive: deviceLive,
+                  secondaryHR: _polarReportedHR > 0 ? '(strap: $_polarReportedHR)' : null,
+                ),
+              ),
+            ],
           ),
         ],
       ),
     );
   }
 
-  Widget _comparisonRow({
+  Widget _comparisonColumn({
     required String label,
     required Color labelColor,
     required String bpm,
     required String rmssd,
-    required String sdnn,
-    required String meanRR,
     required String beats,
-    bool? isLive,
+    required String statusText,
+    required Color statusColor,
+    required bool isLive,
+    String? secondaryHR,
   }) {
     return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
       children: [
+        // Label + live dot
         Row(
+          mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            if (isLive != null) ...[
-              Container(
-                width: 6,
-                height: 6,
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  color: isLive
-                      ? const Color(0xFF4CAF50)
-                      : const Color(0xFFBDBDBD),
-                ),
+            Container(
+              width: 7,
+              height: 7,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: isLive ? const Color(0xFF4CAF50) : const Color(0xFFBDBDBD),
               ),
-              const SizedBox(width: 4),
-            ],
+            ),
+            const SizedBox(width: 5),
             Text(label,
                 style: TextStyle(
-                    fontSize: 11,
+                    fontSize: 12,
                     fontWeight: FontWeight.bold,
                     color: labelColor)),
           ],
         ),
-        const SizedBox(height: 4),
+        const SizedBox(height: 8),
+        // Big BPM
+        Text(bpm,
+            style: TextStyle(
+                fontSize: 36,
+                fontWeight: FontWeight.bold,
+                color: labelColor)),
+        Text('BPM',
+            style: TextStyle(
+                fontSize: 11,
+                color: labelColor.withOpacity(0.7),
+                fontWeight: FontWeight.w500)),
+        if (secondaryHR != null)
+          Text(secondaryHR,
+              style: const TextStyle(fontSize: 9, color: _textSecondary)),
+        const SizedBox(height: 8),
+        // RMSSD
         Row(
+          mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            _metricCell('BPM', bpm),
-            _metricCell('RMSSD', rmssd),
-            _metricCell('SDNN', sdnn),
-            _metricCell('RR', meanRR),
-            _metricCell('Beats', beats),
+            const Text('RMSSD ',
+                style: TextStyle(
+                    fontSize: 10,
+                    color: _textSecondary,
+                    fontWeight: FontWeight.w500)),
+            Text('$rmssd ms',
+                style: const TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.bold,
+                    color: _textPrimary)),
           ],
         ),
+        const SizedBox(height: 2),
+        // Beats
+        Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            const Text('Beats ',
+                style: TextStyle(
+                    fontSize: 10,
+                    color: _textSecondary,
+                    fontWeight: FontWeight.w500)),
+            Text(beats,
+                style: const TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.bold,
+                    color: _textPrimary)),
+          ],
+        ),
+        const SizedBox(height: 6),
+        // Stream status chip
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+          decoration: BoxDecoration(
+            color: statusColor.withOpacity(0.15),
+            borderRadius: BorderRadius.circular(10),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Container(
+                width: 5,
+                height: 5,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: statusColor,
+                ),
+              ),
+              const SizedBox(width: 4),
+              Text(statusText,
+                  style: TextStyle(
+                      fontSize: 9,
+                      fontWeight: FontWeight.w600,
+                      color: statusColor)),
+            ],
+          ),
+        ),
       ],
-    );
-  }
-
-  Widget _metricCell(String label, String value) {
-    return Expanded(
-      child: Column(
-        children: [
-          Text(label,
-              style: const TextStyle(
-                  fontSize: 9,
-                  color: _textSecondary,
-                  fontWeight: FontWeight.w500)),
-          const SizedBox(height: 2),
-          Text(value,
-              style: const TextStyle(
-                  fontSize: 14,
-                  fontWeight: FontWeight.bold,
-                  color: _textPrimary)),
-        ],
-      ),
     );
   }
 
